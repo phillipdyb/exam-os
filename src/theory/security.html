@@ -1,0 +1,107 @@
+<p class="summary">Security theory – authorisation, authentication, encryption – and practice: real attacks such as the Morris worm and the Thompson compiler backdoor, and how buffer overflows on the stack and heap work.</p>
+
+<h2>The vocabulary</h2>
+<dl class="terms">
+  <dt>Principals</dt><dd>Users, programs, system administrators…</dd>
+  <dt>Authorisation</dt><dd>Who is permitted to do what?</dd>
+  <dt>Authentication</dt><dd>How do we know who the user is?</dd>
+  <dt>Encryption</dt><dd>Privacy and authentication across an insecure network.</dd>
+  <dt>Auditing</dt><dd>A record of who changed what, for diagnosis after the fact.</dd>
+</dl>
+
+<h2>Authorisation</h2>
+<p>An <dfn>access control matrix</dfn> lists, for every protected resource, who is permitted to do what. For example, each UNIX file or directory has read, write and execute permissions for owner, group and world. A smartphone keeps a list of permissions granted to each app.</p>
+<p><strong>Setuid:</strong> a program that runs with the permissions of the principal who installed it, not the user who runs it.</p>
+
+<h3>Principle of least privilege</h3>
+<p>Grant each principal the least permission possible for its job:</p>
+<ul>
+  <li>minimise code running inside the kernel,</li>
+  <li>minimise code running as system administrator,</li>
+  <li>give users exactly the permissions they need,</li>
+  <li>keep the number of setuid-root programs to an absolute minimum.</li>
+</ul>
+<p>Running a web server as root breaks the principle. In practice it's hard to know in advance which permissions an app or server will need.</p>
+<p>The <dfn>trusted computing base</dfn> is the set of software trusted to enforce the security policy. Servers often have to be trusted (a storage server stores and retrieves data whoever asks), so a flaw in the server gives the attacker control.</p>
+
+<h2>Authentication and passwords</h2>
+<p>Short passwords are easy to remember and easy to guess; long ones are hard to remember. Where should they be stored?</p>
+<ul>
+  <li><strong>In a file:</strong> anyone with admin rights can read it.</li>
+  <li><strong>Encrypted (hashed) in a file:</strong> if attackers get the file, they can check guesses offline, and reused passwords can be checked against other systems.</li>
+  <li><strong>Hashed with a random salt:</strong> the password and a random salt are hashed together. This defeats precomputed password tables (<em>rainbow tables</em>).</li>
+</ul>
+<p><strong>Two-factor authentication:</strong> store the private key on a smartcard chip, authenticate the card with challenge–response, and use a PIN to prove the user has the card.</p>
+
+<h2>Encryption</h2>
+<p>The sender encrypts plaintext M with a function E and key K<sub>E</sub> into ciphertext C; the receiver decrypts with D and K<sub>D</sub>. Even if E, D, M and C are known, it should be impossible to find the keys or modify the message. Encryption is the basis for authentication, privacy and integrity.</p>
+
+<dl class="terms">
+  <dt>Symmetric key (DES, IDEA)</dt><dd>One key shared by both parties and kept secret from everyone else. Ciphertext = (M)<sup>K</sup>.</dd>
+  <dt>Public key (RSA, PGP)</dt><dd>Keys come in pairs. The public key can be published; the private key is secret. You cannot derive the private key from the public one.</dd>
+</dl>
+<table>
+<thead><tr><th>Goal</th><th>Encrypt with</th><th>Decrypt with</th></tr></thead>
+<tbody>
+<tr><td>Secrecy: only the receiver can read it</td><td>Receiver's <strong>public</strong> key</td><td>Receiver's private key</td></tr>
+<tr><td>Authentication: only the sender could have sent it</td><td>Sender's <strong>private</strong> key</td><td>Sender's public key</td></tr>
+</tbody>
+</table>
+<p>So two parties who want to talk secretly with asymmetric encryption exchange public keys; private keys are never shared.</p>
+
+<h3>Session keys</h3>
+<p>Public key encryption is slow, so it's used to set up a shared <strong>session key</strong> for the rest of the conversation. With symmetric keys alone, everyone can't share a secret with everyone else, so an <strong>authentication server</strong> (Kerberos) shares a separate secret with each user and hands out session keys for A ↔ B. Everyone must trust that server: if it is compromised, the attacker can do anything.</p>
+
+<h3>Message digests (MD5, SHA)</h3>
+<p>A cryptographic checksum for message integrity. Small compared to the message (MD5 is 128 bits) and one-way: it's infeasible to find two messages with the same digest. The message is processed in 512-bit blocks, each transforming the running digest.</p>
+
+<h2>Security in practice</h2>
+<p>Real systems are not that secure. Attackers go after the weakest link: any system with bugs is vulnerable, and it is usually not a brute-force attack on the encryption. It's often impossible to tell whether a system is compromised, and hard to re-secure it, because attackers can leave backdoors.</p>
+<dl class="terms">
+  <dt>Tenex password check</dt><dd>The kernel compared the password one character at a time and returned at the first mismatch. On this early virtual-memory system, that let attackers find the password one character at a time.</dd>
+  <dt>Morris worm (1988)</dt><dd>Spread with a password dictionary, a sendmail bug (debug access enabled by default, known for years but not fixed), and <code>fingerd</code>, which copied a string into a fixed-size stack buffer without checking its length. The worm encoded itself into that string.</dd>
+  <dt>Ping of death</dt><dd>A malformed IP fragment with offset + length larger than the maximum packet size; the kernel's reassembly code didn't check.</dd>
+  <dt>UNIX talk</dt><dd>Setuid root (to write to every terminal), with a bug in its Ctrl-C signal handler.</dd>
+  <dt>Netscape</dt><dd>Seeded its random number generator with the time of day, making session keys predictable. The patch was offered for download over the web – a four-byte change could make it use an attacker's key.</dd>
+  <dt>Code Red, Nimda, Slammer</dt><dd>Worms using known vulnerabilities. Slammer was a single UDP packet and infected 100K+ machines in under 10 minutes. Million-node botnets are now common.</dd>
+</dl>
+
+<h3>The Thompson compiler backdoor</h3>
+<ol>
+  <li>Change <code>login.c</code>: if the name is “ken”, skip the password check and log in as root. Too obvious.</li>
+  <li>Change the C compiler: when it sees a trigger, insert the backdoor into <code>login.c</code>. Now <code>login.c</code> only contains the trigger.</li>
+  <li>Change the compiler again: when it sees a second trigger (compiling the compiler), insert both changes. Compile the compiler, then remove the change from the compiler's source.</li>
+</ol>
+<p>Every compiler built with an infected compiler is infected, even cross-compiled for new machines, and no source code shows it. Lesson: it is hard to re-secure a machine after a break-in, or even to detect one.</p>
+
+<h3>Finding and disclosing bugs</h3>
+<ul>
+  <li><strong>Responsible disclosure:</strong> tell the developers first, work on a fix together, go public if there's no response.</li>
+  <li><strong>Bug bounty programs.</strong></li>
+  <li><strong>Selling zero-days</strong> to brokers who resell them – ethically questionable.</li>
+</ul>
+
+<h2>Buffer overflows</h2>
+<p>A buffer overflow happens when a program writes more data into a buffer than it has room for. The classic culprit is <code>gets()</code>, which has no idea how big the buffer is:</p>
+<pre><code>#include &lt;stdio.h&gt;
+int main()
+{
+    int a = 0;
+    char buf[10];
+    int b = 0;
+    gets(buf);
+    printf("a=%d, b=%d\n", a, b);
+}</code></pre>
+<p>Typing more than 10 characters overwrites the neighbouring variables on the stack, so <code>a</code> or <code>b</code> is no longer 0.</p>
+<dl class="terms">
+  <dt>On the stack</dt><dd>Local variables can be corrupted, and the saved return address can be overwritten. The attacker then controls where the function returns – control of program execution.</dd>
+  <dt>On the heap</dt><dd>Allocated data after the buffer can be corrupted. There is no return address on the heap, but function pointers stored there can be overwritten, which also gives control of execution.</dd>
+</dl>
+<h3>Mitigations</h3>
+<ul>
+  <li>Use safe library calls: <code>fgets(buf, sizeof(buf), stdin)</code> instead of <code>gets</code>.</li>
+  <li>Code review.</li>
+  <li>Compiler protections: <code>-fstack-protector</code> (stack canaries), <code>-pie</code> (position-independent executables).</li>
+  <li>ASLR: randomising the stack, heap and text segment makes valid addresses hard to find.</li>
+  <li>Run vulnerable programs with reduced permissions, or in a container or VM.</li>
+</ul>

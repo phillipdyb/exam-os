@@ -1,0 +1,154 @@
+<p class="summary">The system calls programs use to manage processes (fork, exec, wait, signal), do I/O (open, read, write, close) and talk to each other (pipe, dup). The shell ties them together.</p>
+
+<h2>Main points</h2>
+<ul>
+  <li>Creating and managing processes: <code>fork</code>, <code>exec</code>, <code>wait</code></li>
+  <li>Performing I/O: <code>open</code>, <code>read</code>, <code>write</code>, <code>close</code></li>
+  <li>Communicating between processes: <code>pipe</code>, <code>dup</code>, <code>select</code>, <code>connect</code></li>
+  <li>Example: implementing a shell</li>
+</ul>
+
+<h2>The shell</h2>
+<p>A shell is a job control system: it lets the user create and manage a set of programs to do some task. Windows, macOS and Linux all have one. Compiling a C program, for example, runs several programs in turn:</p>
+<pre><code>cc -c sourcefile1.c
+cc -c sourcefile2.c
+ln -o program sourcefile1.o sourcefile2.o</code></pre>
+<p>Since the shell runs at user level, it must use system calls to start each program.</p>
+
+<h2>Creating processes</h2>
+<h3>Windows: CreateProcess</h3>
+<p>One system call that does everything:</p>
+<ol>
+  <li>Create and initialise the process control block (PCB) in the kernel.</li>
+  <li>Create and initialise a new address space.</li>
+  <li>Load the program into the address space.</li>
+  <li>Copy arguments into memory in the address space.</li>
+  <li>Initialise the hardware context to start execution at “start”.</li>
+  <li>Inform the scheduler that the new process is ready to run.</li>
+</ol>
+
+<h3>UNIX: fork, exec, wait, signal</h3>
+<dl class="terms">
+  <dt><code>fork</code></dt><dd>Create a copy of the current process and start it running. No arguments. Returns 0 in the child and the child's process ID in the parent (−1 on error).</dd>
+  <dt><code>exec</code></dt><dd>Change the program being run by the current process. Only returns if it fails.</dd>
+  <dt><code>wait</code></dt><dd>Wait for a child process to finish (block until the specified child has exited).</dd>
+  <dt><code>signal</code></dt><dd>Send a notification to another process.</dd>
+</dl>
+
+<p><strong>Implementing fork:</strong> create and initialise the PCB; create a new address space; initialise it with a copy of the entire contents of the parent's address space; inherit the parent's execution context (for example open files); tell the scheduler the new process is ready.</p>
+<p><strong>Implementing exec:</strong> load the program into the current address space; copy the arguments into memory in the address space; initialise the hardware context to start at “start”.</p>
+<p>So the main difference from Windows: <code>fork()</code> copies the parent's process image into the child, while <code>CreateProcess</code> reads the executable image from disk. In practice fork does not copy every page: see <a href="address-translation.html#copy-on-write">copy-on-write</a>.</p>
+
+<pre><code>int child_pid = fork();
+if (child_pid == 0) {           // I'm the child process
+    printf("I am process #%d\n", getpid());
+    return 0;
+} else {                        // I'm the parent process
+    printf("I am parent of process #%d\n", child_pid);
+    return 0;
+}</code></pre>
+<p>Both lines print, from two different processes, in an order chosen by the scheduler.</p>
+
+<h3>Questions from the lecture</h3>
+<ul>
+  <li><em>Can fork return an error?</em> Yes, for example when the process limit is reached.</li>
+  <li><em>Can exec return an error?</em> Yes, for example when the file doesn't exist. If it returns at all, it failed.</li>
+  <li><em>Can wait return immediately?</em> Yes, if the child has already finished.</li>
+</ul>
+
+<h2>Implementing a shell</h2>
+<pre><code>char *prog, **args;
+int child_pid;
+
+// Read and parse the input a line at a time
+while (readAndParseCmdLine(&amp;prog, &amp;args)) {
+    child_pid = fork();         // create a child process
+    if (child_pid == 0) {
+        exec(prog, args);       // I'm the child process. Run program
+        // NOT REACHED
+    } else {
+        wait(child_pid);        // I'm the parent, wait for child
+    }
+}</code></pre>
+<p>The shell forks and then execs in the child because calling exec directly would replace the shell itself.</p>
+
+<h3>The course's shell exercise</h3>
+<ol>
+  <li>Print a prompt with <code>printf()</code> or <code>puts()</code>.</li>
+  <li>Read input from stdin.</li>
+  <li><code>fork()</code> a child process.</li>
+  <li>In the child, call <code>execve()</code> with the file the user typed.</li>
+  <li>In the parent, call <code>wait()</code>, which returns when the child exits.</li>
+  <li>Go back to step 1.</li>
+</ol>
+<p>Two common pitfalls:</p>
+<ul>
+  <li><code>execve</code> is the raw system call and needs a full path (<code>/bin/ls</code>, not <code>ls</code>); otherwise it fails with “No such file or directory”. <code>execvp</code> and <code>execlp</code> also search <code>$PATH</code>.</li>
+  <li><code>fgets</code> keeps the trailing newline, so <code>execve</code> won't find the file. Replace <code>'\n'</code> with <code>'\0'</code> first.</li>
+</ul>
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/types.h&gt;
+#include &lt;string.h&gt;
+#include &lt;sys/wait.h&gt;
+
+int main()
+{
+    char input[256];
+    while(1)
+    {
+        printf("shell&gt; ");
+        fflush(0);
+        fgets(input, sizeof(input), stdin);
+        if(strlen(input) &lt; 2)
+            continue;
+        input[strlen(input)-1] = '\0'; // Strip newline
+
+        int pid = fork();
+        if(pid == 0)
+        {
+            // Child
+            char *args[] = {input, NULL};
+            char *env[] = {NULL};
+            execve(input, args, env);
+        }
+        else
+        {
+            // Parent, wait
+            waitpid(pid, NULL, 0);
+        }
+    }
+}</code></pre>
+<p>Extensions from the exercises: tokenise with <code>strtok</code> and call <code>execvp(args[0], args)</code>; run jobs in the background with <code>&amp;</code> (don't wait); redirect I/O with <code>dup2</code> before <code>execvp</code>; build pipes with <code>pipe</code> and <code>dup2</code>; catch <code>SIGINT</code> in the shell but not in the children.</p>
+<p>If the parent never calls <code>wait</code>, nobody collects the child's exit status, and the parent may finish first so the shell prompt gets mixed up with the child's output.</p>
+
+<h2>Fork bombs</h2>
+<p>A fork bomb is a process that keeps replicating itself to use up system resources (a denial-of-service attack):</p>
+<pre><code>void main()
+{
+    while(1) fork();
+}</code></pre>
+<p>Every child runs the same loop, so the number of processes grows exponentially and overwhelms memory and the process table. Since <code>fork()</code> is a system call, the OS can limit it: a maximum number of processes per user, which on Linux you can see with <code>ulimit -u</code>.</p>
+
+<h2>UNIX I/O</h2>
+<ul>
+  <li><strong>Uniformity:</strong> all operations on all files and devices use the same calls: <code>open</code>, <code>close</code>, <code>read</code>, <code>write</code>.</li>
+  <li><strong>Open before use:</strong> <code>open</code> returns a handle, the <dfn>file descriptor</dfn>, used in later calls.</li>
+  <li><strong>Byte-oriented.</strong></li>
+  <li><strong>Kernel-buffered</strong> read and write.</li>
+  <li><strong>Explicit close</strong>, to garbage-collect the open file descriptor.</li>
+</ul>
+<p>Every process starts with three descriptors: 0 (stdin), 1 (stdout) and 2 (stderr).</p>
+
+<h3>Why open is a Swiss Army knife</h3>
+<p>UNIX <code>open</code> takes options: return an error if the file doesn't exist, or create it; return an error if it already exists, or open it; truncate it if it isn't empty, and so on. Why not separate calls?</p>
+<pre><code>if (!exists(name))
+    create(name);   // can create fail?
+fd = open(name);    // does the file exist?</code></pre>
+<p>Between each call, another process could create or delete the file. Combining them into one system call makes the check-and-act atomic.</p>
+
+<h2>Strace: watching the kernel</h2>
+<p>The exercises use <code>strace</code> to see the system calls behind library functions:</p>
+<pre><code>strace -e trace=clone,execve,wait4 ./forkexec
+strace -c ./fileread_multi big.bin syscalls sequential &gt; /dev/null</code></pre>
+<p>On Linux, <code>fork</code> and <code>pthread_create</code> both show up as <code>clone</code>; see <a href="threads.html#threads-in-linux">threads</a>.</p>

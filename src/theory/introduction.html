@@ -1,0 +1,62 @@
+<p class="summary">An operating system is software that manages a computer's resources for its users and applications. It plays three roles at once – referee, illusionist and glue – and is judged on reliability, security, portability and performance.</p>
+
+<h2>Definition</h2>
+<p>An <dfn>operating system</dfn> (OS) is software to manage a computer's resources for its users and applications. The course follows the textbook <em>Operating Systems: Principles and Practice</em> (Anderson &amp; Dahlin) and is taught as a flipped classroom: video lectures at home, practical exercises in class.</p>
+
+<h2>Three roles</h2>
+<dl class="terms">
+  <dt>Referee</dt>
+  <dd>Resource allocation among users and applications, isolation of users and applications from each other, and communication between them.</dd>
+  <dt>Illusionist</dt>
+  <dd>Each application appears to have the entire machine to itself: an infinite number of processors, (near) infinite memory, reliable storage and reliable network transport. This is what <em>virtualisation</em> means in an OS: providing the illusion of resources that may not be physically present.</dd>
+  <dt>Glue</dt>
+  <dd>Common services: libraries, user interface widgets and so on.</dd>
+</dl>
+
+<h3>Example: file systems</h3>
+<ul>
+  <li><strong>Referee:</strong> prevent users from accessing each other's files without permission, even after a file is deleted and its space re-used.</li>
+  <li><strong>Illusionist:</strong> files can grow (nearly) arbitrarily large, and they persist even when the machine crashes in the middle of a save.</li>
+  <li><strong>Glue:</strong> named directories, <code>printf</code>, and so on.</li>
+</ul>
+
+<div class="exam-tip"><span class="tip-label">On the exam</span>
+<p>Isolation is the reason an error in one application should not disrupt other applications (2023, Q1). A memory leak in one program that makes other programs stop responding is a symptom of poor reliability (2024, Q1).</p></div>
+
+<h2>OS challenges</h2>
+<dl class="terms">
+  <dt>Reliability</dt><dd>Does the system do what it was designed to do?</dd>
+  <dt>Availability</dt><dd>What portion of the time is the system working? Measured with <em>mean time to failure</em> (MTTF) and <em>mean time to repair</em> (MTTR). Availability improves if MTTF goes up or MTTR goes down.</dd>
+  <dt>Security</dt><dd>Can the system be compromised by an attacker?</dd>
+  <dt>Privacy</dt><dd>Data is accessible only to authorised users.</dd>
+  <dt>Portability</dt><dd>For programs: an application programming interface (API) and an abstract virtual machine (AVM). For the OS itself: a hardware abstraction layer.</dd>
+</dl>
+
+<h3>Performance</h3>
+<dl class="terms">
+  <dt>Latency (response time)</dt><dd>How long does an operation take to complete?</dd>
+  <dt>Throughput</dt><dd>How many operations can be done per unit of time?</dd>
+  <dt>Overhead</dt><dd>How much extra work is done by the OS?</dd>
+  <dt>Fairness</dt><dd>How equal is the performance received by different users?</dd>
+  <dt>Predictability</dt><dd>How consistent is the performance over time?</dd>
+</dl>
+<p>The same terms come back in <a href="scheduling.html">scheduling</a>.</p>
+
+<h2>A short history</h2>
+<table>
+<thead><tr><th>Era</th><th>What was expensive</th><th>What the OS did</th></tr></thead>
+<tbody>
+<tr><td>Early systems</td><td>Computers</td><td>One application at a time, with complete control of the hardware. The OS was a runtime library and users stood in line.</td></tr>
+<tr><td>Batch systems</td><td>Computers</td><td>Keep the CPU busy with a queue of jobs; load the next job while the current one runs. Users submitted jobs and waited.</td></tr>
+<tr><td>Time-sharing</td><td>Computers and people</td><td>Multiple users at the same time. Multiprogramming and interactive performance: as computers got cheaper, optimising for user time mattered more than computer time.</td></tr>
+<tr><td>Today</td><td>Neither</td><td>Smartphones, embedded systems, laptops, tablets, virtual machines, data-centre servers.</td></tr>
+</tbody>
+</table>
+<p>Looking ahead, the lecture lists giant-scale data centres, more processors per computer, more computers per user and very large-scale storage.</p>
+
+<h2>Questions to think about</h2>
+<ul>
+  <li>What hardware and software do you need to safely run an untrustworthy application? (Answered in <a href="kernel.html">the kernel abstraction</a>.)</li>
+  <li>How should the OS divide processing time between competing uses? First to arrive, smallest, largest? (Answered in <a href="scheduling.html">scheduling</a>.)</li>
+  <li>How does a web server manage many simultaneous requests, keep clients safe from malicious scripts, and give clients a consistent view while the site is updated?</li>
+</ul>

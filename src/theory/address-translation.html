@@ -1,0 +1,121 @@
+<p class="summary">How a virtual address becomes a physical one: base and bounds, segmentation, paging, multi-level tables and the TLB – plus the process memory layout and the tricks translation makes possible, such as copy-on-write.</p>
+
+<h2>Virtual memory</h2>
+<p>In general, virtual memory is the address space a process can “see”. Its size depends on the instruction set: a 64-bit CPU has 64-bit addresses (in practice 48 or 40 bits are used), a 32-bit CPU has 32-bit addresses.</p>
+<p>Every load and store uses a virtual address, which the <dfn>memory management unit</dfn> (MMU) converts to a physical address. The kernel sets up the translation tables for each process; the hardware does the translation.</p>
+<h3>Goals of address translation</h3>
+<ul>
+  <li>Memory protection</li>
+  <li>Memory sharing: shared libraries, interprocess communication</li>
+  <li>Sparse addresses: many regions of dynamic allocation (heaps and stacks)</li>
+  <li>Efficiency: memory placement, runtime lookup, compact tables</li>
+  <li>Portability</li>
+</ul>
+
+<h2>Process memory layout</h2>
+<p>From low to high addresses, a process's user address space typically holds:</p>
+<dl class="terms">
+  <dt>Text (code)</dt><dd>The executable instructions. Usually read-only and shareable, so one copy can serve every process running the same program.</dd>
+  <dt>Data</dt><dd>Initialised global and static variables, e.g. <code>int debug = 1;</code> outside any function.</dd>
+  <dt>BSS</dt><dd>Uninitialised (or zero-initialised) globals and statics, e.g. <code>static int i;</code>. The kernel zeroes it before the program starts.</dd>
+  <dt>Heap</dt><dd>Dynamic memory from <code>malloc</code>/<code>free</code>. Starts after BSS and grows upwards.</dd>
+  <dt>Stack</dt><dd>A LIFO structure of stack frames: local variables, function arguments and the return address. On x86 it starts at high addresses and grows downwards.</dd>
+</dl>
+<p>On 32-bit Linux, the top 1 GB of the 4 GB virtual address space is reserved for the kernel. When you run the same program twice, the OS gives each copy its own data, heap and stack, but reuses the code.</p>
+<pre><code>void func() { int a; }          // a is on the stack
+void *mem = malloc(256);       // 256 bytes on the heap</code></pre>
+<p>The exercise program <code>proc_maps.c</code> prints the address of <code>main</code>, a global and a local, then sleeps so you can read <code>/proc/&lt;pid&gt;/maps</code>. The addresses change between runs because of <strong>address space layout randomisation</strong> (ASLR), which randomises the location of the heap, stack and text segment.</p>
+
+<h2>Base and bounds</h2>
+<p>Each process gets one contiguous region of physical memory. With <em>virtually addressed</em> base and bounds, the hardware checks each virtual address against the bound and adds the base. On a context switch, only the base and bound registers are saved and restored.</p>
+<table>
+<thead><tr><th>Pros</th><th>Cons</th></tr></thead>
+<tbody><tr>
+<td>Simple; fast (2 registers, an adder, a comparator); safe; the process can be relocated in physical memory without changing it.</td>
+<td>Can't keep a program from overwriting its own code; can't share code or data with other processes; can't grow the stack or heap as needed.</td>
+</tr></tbody>
+</table>
+<p>Base and bounds does provide isolation between processes; that is not one of its limitations.</p>
+
+<h2>Segmentation</h2>
+<p>A segment is a contiguous region of virtual memory. Each process has a segment table in hardware – effectively an array of base and bound pairs, one per segment. Each entry has a start, a length and access permissions, and a segment can be anywhere in physical memory. Processes can share segments (same start and length, same or different permissions). The code segment should not be writable.</p>
+<p>On a context switch, the segment table is saved and restored.</p>
+<table>
+<thead><tr><th>Pros</th><th>Cons</th></tr></thead>
+<tbody><tr>
+<td>Can share code and data segments; can protect the code segment; can grow stack and heap transparently; can detect when copy-on-write is needed.</td>
+<td>Complex memory management: finding a free chunk of the right size, sometimes rearranging memory. <dfn>External fragmentation</dfn>: wasted space between chunks.</td>
+</tr></tbody>
+</table>
+
+<h3 id="copy-on-write">Copy-on-write</h3>
+<p>UNIX <code>fork</code> makes a complete copy of a process. With segments (or pages) it can be done more efficiently:</p>
+<ol>
+  <li>Copy the segment (or page) table into the child.</li>
+  <li>Mark the parent's and child's segments read-only.</li>
+  <li>Start the child; return to the parent.</li>
+  <li>If either writes to a segment (for example the stack or heap), trap into the kernel, make a copy of that segment, and resume.</li>
+</ol>
+<p>This avoids copying memory that is never written, which matters most for fork followed by exec, where the copy would be thrown away immediately. The <code>cow.c</code> exercise allocates 64 MB, forks, and reads <code>/proc/self/smaps</code>: right after the fork the memory is shared; once the child writes, it becomes private.</p>
+
+<h3 id="zero-on-reference">Zero-on-reference</h3>
+<p>How much physical memory does a stack or heap need? Only what is currently in use. When the program uses memory beyond the end of the stack, it faults into the kernel, which allocates some memory, <strong>zeroes it</strong> (to avoid leaking another process's data), updates the table and resumes the process.</p>
+
+<h2>Paging</h2>
+<p>Memory is managed in fixed-size units: <dfn>pages</dfn> in virtual memory and <dfn>frames</dfn> in physical memory. Finding a free frame is easy: a bitmap with one bit per frame. Each process has its own <dfn>page table</dfn> in physical memory (RAM), and hardware registers point to its start and length.</p>
+<p>A virtual address is split into a <strong>virtual page number</strong> (VPN) and an <strong>offset</strong>. The page table maps the VPN to a <strong>page frame number</strong> (PFN). The offset passes through unchanged.</p>
+<pre><code>virtual address:   | VPN | offset |
+                      |
+                page table
+                      v
+physical address:  | PFN | offset |</code></pre>
+<p>On a context switch, only the pointer to the page table and its size are saved; the table itself stays in memory. Very small pages mean huge page tables. Very large pages mean <dfn>internal fragmentation</dfn>: unused space inside a fixed-size chunk.</p>
+<p>Sharing works by pointing entries in two page tables at the same frames. A <em>core map</em> of physical frames tracks which processes point to which frame (a reference count).</p>
+
+<h3>Translating by hand</h3>
+<p>Work out how many bits the offset needs (page size 2<sup>n</sup> → n bits), take the remaining high bits as the VPN, look it up, and glue the PFN to the unchanged offset. If the entry is not present, it is a page fault.</p>
+<p><strong>Example (exercises):</strong> 16-bit addresses, 4 KB pages, so a 12-bit (three hex digits) offset and a 4-bit VPN. The table maps VPN 3 → frame 5. Then <code>0x3500</code> → VPN 3, offset <code>0x500</code> → <code>0x5500</code>.</p>
+<p><strong>Example (2025 exam):</strong> 256-byte pages and 20-bit addresses. Offset = 8 bits, VPN = 12 bits, so the table has 2<sup>12</sup> = 4096 entries and the address space is 2<sup>20</sup> = 1 MB. <code>0000 0000 1110 | 1010 1011</code> has VPN 14; if VPN 14 maps to PFN <code>0001 0110 0000</code>, the physical address is <code>0001 0110 0000 1010 1011</code>.</p>
+<p><strong>Example with decimal addresses</strong> (Norwegian exercises): with 4096-byte pages, virtual address 8300 is in page 2 (8300 div 4096) at offset 8300 − 2 × 4096 = 108. If page 2 is in frame 6, the physical address is 6 × 4096 + 108 = 24684.</p>
+<p>Counting bits: 256 KB of virtual memory needs 18-bit addresses (2<sup>18</sup> = 256K); 64 KB of physical memory needs 16. The number of page table entries is the virtual memory size divided by the page size: 4 MB of virtual memory with 4 KB pages gives 1024 entries.</p>
+
+<h3>Fill on demand</h3>
+<p>Can a program start before its code is in memory? Yes: mark all page table entries invalid; when a page is referenced for the first time, the kernel traps, brings the page in from disk and resumes. The remaining pages can be loaded in the background. This leads to <a href="virtual-memory.html">demand paging</a>.</p>
+
+<h2>Multi-level translation</h2>
+<p>Address spaces are sparse: per-processor heaps, per-thread stacks, memory-mapped files, dynamically linked libraries. A flat page table for a large address space would be huge: 32-bit addresses with 4 KB pages need about 1 million entries (the slides say 500K), and 64-bit addresses about 4 quadrillion.</p>
+<p>The solution is a tree of tables: paged segmentation, multi-level page tables, or multi-level paged segmentation. The lowest level is always a fixed-size page, which gives:</p>
+<ul>
+  <li>efficient memory allocation (compared to segments),</li>
+  <li>efficiency for sparse addresses (compared to flat paging),</li>
+  <li>efficient disk transfers (fixed-size units),</li>
+  <li>easier TLBs and efficient reverse lookup (physical → virtual),</li>
+  <li>variable granularity for protection and sharing.</li>
+</ul>
+<p><strong>Paged segmentation:</strong> each segment table entry points to a page table and holds its length and permissions; each page table entry holds a frame and permissions.</p>
+
+<h3>Two-level example (2024 exam)</h3>
+<p>Format: 8-bit top-level index | 8-bit second-level index | 16-bit offset. To translate <code>0x0003AB05</code>: top index <code>0x00</code> → page table A; second index <code>0x03</code> → frame <code>0xCACA</code>; offset <code>0xAB05</code> → physical address <code>0xCACAAB05</code>. If any level is invalid, the address is invalid.</p>
+<p>How many entries per table? 16 KB pages and a 36-bit address space give a 14-bit offset, leaving 22 bits for the page number. Split over two levels, each table has 2<sup>11</sup> = 2048 entries.</p>
+
+<h3>Inverted page table</h3>
+<p>Many operating systems keep their own portable translation structures. One approach is an inverted page table: a hash from virtual page to physical page, using space proportional to the number of physical pages rather than virtual ones.</p>
+
+<h2>The TLB</h2>
+<p>Walking a multi-level page table on every memory access would be far too slow. The <dfn>translation lookaside buffer</dfn> (TLB) is a cache of recent virtual page → physical page translations. On a hit the translation is used directly; on a miss the hardware walks the page table.</p>
+<p class="note">Cost of translation = cost of TLB lookup + P(TLB miss) × cost of page table lookup</p>
+<p>The hardware design principle: the bigger the memory, the slower the memory. So the TLB is small and fast. (The i7 example has an 8 MB shared L3 cache and a per-core L2.)</p>
+<p>On a context switch, the TLB entries of the old process would be wrong. Either discard the TLB, or use a <strong>tagged TLB</strong>: each entry carries a process ID and only hits if it matches the current process.</p>
+
+<h2>What translation is used for</h2>
+<ul>
+  <li><strong>Process isolation:</strong> keep processes out of each other's memory and the kernel's.</li>
+  <li><strong>Efficient IPC:</strong> shared regions of memory between processes.</li>
+  <li><strong>Shared code segments:</strong> e.g. common libraries.</li>
+  <li><strong>Program initialisation:</strong> start running before the program is in memory.</li>
+  <li><strong>Dynamic memory allocation:</strong> allocate and initialise stack and heap pages on demand.</li>
+  <li><strong>Program debugging:</strong> data breakpoints when an address is accessed.</li>
+  <li><strong>Zero-copy I/O:</strong> directly between the device and user memory.</li>
+  <li><strong>Memory-mapped files:</strong> access file data with load and store instructions.</li>
+  <li><strong>Demand-paged virtual memory:</strong> the illusion of near-infinite memory, backed by disk.</li>
+</ul>

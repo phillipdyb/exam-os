@@ -1,0 +1,102 @@
+<p class="summary">A thread is a single execution sequence that can be scheduled on its own. This article covers the thread abstraction, the pthread API, how threads are implemented and switched, and how Linux creates them.</p>
+
+<h2>Why concurrency</h2>
+<p>Operating systems and applications have to handle many things at once: process execution, interrupts, background tasks, system maintenance. Humans are not good at keeping track of many simultaneous things, and threads bridge that gap. Typical uses:</p>
+<ul>
+  <li><strong>Servers:</strong> handle multiple connections at once.</li>
+  <li><strong>Parallel programs:</strong> better performance.</li>
+  <li><strong>User interfaces:</strong> stay responsive while computing.</li>
+  <li><strong>Network- and disk-bound programs:</strong> hide latency.</li>
+</ul>
+<p>A word processor might have one thread each for reading the keyboard, formatting, saving to disk, spell-checking and drawing the GUI.</p>
+
+<h2>Definition and abstraction</h2>
+<p>A <dfn>thread</dfn> is a single execution sequence that represents a separately schedulable task. It's single-sequence, so it uses the familiar programming model; and it's separately schedulable, so the OS can run or suspend it at any time.</p>
+<p>The <dfn>thread abstraction</dfn>: there is an infinite number of processors, and <strong>threads execute with variable speed</strong>. Each thread runs on its own virtual processor with unpredictable speed, so programs must be designed to work with any schedule.</p>
+
+<div class="exam-tip"><span class="tip-label">On the exam</span>
+<p>“Each thread runs on its own virtual processor with unpredictable and variable speed” was the answer in both 2023 (Q13) and 2025 (Q9). The main benefit of threads over processes is that they need less resources and overhead to create (2024 Q11).</p></div>
+
+<h2>Thread operations</h2>
+<dl class="terms">
+  <dt><code>thread_create(thread, func, args)</code></dt><dd>Create a new thread to run <code>func(args)</code>.</dd>
+  <dt><code>thread_yield()</code></dt><dd>Give up the processor voluntarily, so another thread can be scheduled.</dd>
+  <dt><code>thread_join(thread)</code></dt><dd>In the parent, wait for the thread to exit, then return.</dd>
+  <dt><code>thread_exit</code></dt><dd>Quit the thread and clean up, waking up the joiner if any.</dd>
+</dl>
+<p>In POSIX these are <code>pthread_create</code>, <code>pthread_join</code>, <code>pthread_exit</code> and <code>pthread_self</code>. Compile with <code>-lpthread</code> (or <code>-pthread</code>).</p>
+
+<h3>threadHello</h3>
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;pthread.h&gt;
+#define NTHREADS 10
+pthread_t threads[NTHREADS];
+
+void *go (void *n) {
+    printf("Hello from thread %ld\n", (long)n);
+    pthread_exit(100 + n);
+    // REACHED?
+}
+
+int main() {
+    long i;
+    for (i = 0; i &lt; NTHREADS; i++)
+        pthread_create(&amp;threads[i], NULL, go, (void*)i);
+    for (i = 0; i &lt; NTHREADS; i++) {
+        long exitValue;
+        pthread_join(threads[i], (void*)&amp;exitValue);
+        printf("Thread %ld returned with %ld\n", i, exitValue);
+    }
+    printf("Main thread done.\n");
+    return 0;
+}</code></pre>
+<ul>
+  <li>The “Hello” lines can come in any order: the scheduler decides.</li>
+  <li>The “Thread i returned” lines always come in order, because <code>main</code> joins thread 0, then 1, and so on.</li>
+  <li>The line after <code>pthread_exit</code> is never reached.</li>
+  <li>When thread 5 prints, at most 11 threads exist (main and all ten) and at least 2 (main, which is still waiting to join, and thread 5).</li>
+</ul>
+<p>Since <code>pthread_create</code> only passes one <code>void *</code> argument, pass a pointer to a struct when the thread needs more (the threaded server exercise passes the socket fd and address this way). If you had to wrap <code>pthread_create</code> in a function taking a single parameter, that parameter would be the function the thread should run.</p>
+
+<h2>Fork/join concurrency</h2>
+<p>Threads can create children and wait for them. If data is only shared before the fork and after the join, the threads are independent. Examples: a web server with a thread per connection (as long as connections are independent), merge sort, parallel memory copy.</p>
+
+<h2>Implementation</h2>
+<p>Each thread has a <dfn>thread control block</dfn> (TCB) with its saved registers and a pointer to its own stack. Shared state (code, globals, heap) is in the process. A thread moves between the states <em>init → ready → running → waiting → ready … → finished</em>.</p>
+<h3>Creating a thread</h3>
+<ol>
+  <li>Allocate a thread control block.</li>
+  <li>Allocate a stack.</li>
+  <li>Build a stack frame for the base of the stack (a stub), and put <code>func</code> and <code>args</code> on it.</li>
+  <li>Put the thread on the ready list. It runs some time later, maybe right away.</li>
+</ol>
+<p>The stub calls <code>(*func)(args)</code> and calls <code>thread_exit()</code> if the function returns. The new stack is set up as if the thread had saved its state in <code>switchframe</code>, so the first switch “returns” into the stub.</p>
+
+<h3>Context switches</h3>
+<p><strong>Voluntary:</strong> <code>thread_yield</code>, or <code>thread_join</code> when the child hasn't finished. Save registers on the old stack, switch to the new stack and thread, restore registers from the new stack, return. This works the same for kernel threads and user threads.</p>
+<p><strong>Involuntary:</strong> an interrupt or exception, or a higher-priority thread becoming ready. The timer or I/O interrupt tells the OS another thread should run; the end of the interrupt handler calls switch, so processor state is saved twice (once by the handler, once by the switch).</p>
+<p>Threads that only switch by yielding are called <dfn>cooperative</dfn>; threads that can be interrupted at any time are <dfn>pre-emptive</dfn>.</p>
+
+<h3>Kernel and user-level threads</h3>
+<dl class="terms">
+  <dt>Kernel threads</dt><dd>Only available inside the kernel. To the kernel, a kernel thread and a single-threaded user process look much the same.</dd>
+  <dt>Multithreaded processes using kernel threads (Linux, macOS)</dt><dd>User thread = kernel thread. Thread operations are system calls, and the kernel does the context switch. Simple, but many transitions between user and kernel mode.</dd>
+  <dt>User-level threads (“green threads”, early Java)</dt><dd>A library inside a single-threaded process does the context switch, with preemption via an upcall (signal) on a timer interrupt. Use multiple processes for parallelism.</dd>
+</dl>
+
+<h3>Thread stacks</h3>
+<p>Each thread has a fixed-size stack. If a thread recurses too deeply, it overflows its stack: the exercises suggest trying it to see what happens.</p>
+
+<h2>Threads in Linux</h2>
+<p>Each <code>pthread_create</code> becomes a <code>clone</code> (or <code>clone3</code>) system call. <code>clone</code> takes flags saying what to share: address space, file descriptors, signal handlers and so on. <code>fork</code> is essentially <code>clone</code> with no sharing flags, so the child gets its own copy of everything.</p>
+<pre><code>strace -e trace=clone,clone3,write ./threadHello 2&gt;&amp;1 | grep -E "clone|Hello"</code></pre>
+<p>That's why, in <code>forkVsThread.c</code>, a forked child's <code>shared++</code> does not change the parent's variable, while two threads incrementing <code>shared</code> both change the same variable. Without synchronisation, two threads each doing <code>shared++</code> ten thousand times will not reliably reach 20000; see <a href="synchronisation.html">synchronisation</a>.</p>
+
+<h2>Speedup from parallelism</h2>
+<p>The <code>parallel.c</code> exercise counts to N twice, first serially, then in two threads. <code>time</code> reports three numbers:</p>
+<dl class="terms">
+  <dt>real</dt><dd>Wall-clock time from start to finish.</dd>
+  <dt>user</dt><dd>CPU time in user mode, summed over all cores.</dd>
+  <dt>sys</dt><dd>CPU time in kernel mode (creating, scheduling and joining threads).</dd>
+</dl>
+<p>With two cores, real time roughly halves while user time stays about the same: the same total work spread over two cores. It is slightly more than half because of thread creation and scheduling overhead, and adding threads stops helping once there are more threads than cores.</p>

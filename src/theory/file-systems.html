@@ -1,0 +1,140 @@
+<p class="summary">How file systems turn slow, block-based devices into named, persistent files. Disk and flash characteristics, the UNIX file API, and three designs compared: FAT, the Berkeley Fast File System and NTFS.</p>
+
+<h2>What a file system provides</h2>
+<p>A file system is an abstraction on top of persistent storage (magnetic disk, flash memory). Devices give storage that usually survives crashes, block-level random access, and large capacity at low cost – but slow performance: a magnetic disk read takes 10–20 million processor instructions.</p>
+<p>As illusionist, the file system hides the limits of physical storage:</p>
+<ul>
+  <li><strong>Persistence,</strong> even if a crash happens during an update, a block gets corrupted or flash wears out.</li>
+  <li><strong>Naming:</strong> named data instead of block numbers, directories instead of flat storage, byte-addressable data on block devices.</li>
+  <li><strong>Performance:</strong> caching, data placement and data structure organisation.</li>
+  <li><strong>Controlled access</strong> to shared data.</li>
+</ul>
+
+<h2>The abstraction</h2>
+<dl class="terms">
+  <dt>File</dt><dd>A named collection of data: a linear sequence of bytes, read and written or memory-mapped.</dd>
+  <dt>Directory</dt><dd>A group of named files or subdirectories: a mapping from file name to the location of the file's metadata.</dd>
+  <dt>Path</dt><dd>A string that uniquely identifies a file or directory, e.g. <code>/cse/www/education/courses/cse451/12au</code>.</dd>
+  <dt>Hard link</dt><dd>A link from a name to a metadata location.</dd>
+  <dt>Soft link</dt><dd>A link from a name to another name.</dd>
+  <dt>Mount</dt><dd>A mapping from a name in one file system to the root of another.</dd>
+</dl>
+<p>A file system should also leave itself in a valid state after an OS crash or disk error, and get close to the hardware's speed in the average case.</p>
+
+<h2>Storage devices</h2>
+<table>
+<thead><tr><th></th><th>Magnetic disk</th><th>Flash memory</th></tr></thead>
+<tbody>
+<tr><td>Reliability</td><td>Rarely corrupted</td><td>Rarely corrupted</td></tr>
+<tr><td>Cost</td><td>Large capacity at low cost</td><td>Intermediate (about 50× disk)</td></tr>
+<tr><td>Access</td><td>Block-level random access</td><td>Block-level random access</td></tr>
+<tr><td>Performance</td><td>Slow for random access, better for streaming</td><td>Good for reads, worse for random writes</td></tr>
+</tbody>
+</table>
+
+<h3>Disk access time</h3>
+<p>Reading a block costs <strong>seek time</strong> (moving the arm to the track) + <strong>rotational delay</strong> (waiting for the block to come under the head) + <strong>transfer time</strong>. Rotation often dominates, even when the seek is short.</p>
+<p>In the OSTEP disk simulator (12 blocks per track, 30 time units per block, 360 per revolution, 40 per track of seek), reading block 18 from a head halfway through block 6 costs seek 40, rotation 305 and transfer 30. The seek happens while the disk rotates, so it is part of the 345 units of rotation the head has to wait anyway.</p>
+<p>Disk scheduling: <strong>FIFO</strong> serves requests in arrival order; <strong>SSTF</strong> (shortest seek time first) serves the closest one. For requests 0, 35, 18, FIFO goes 0 → 35 → 18 (735 units) and SSTF goes 0 → 18 → 35 (525 units). SSTF can starve far-away requests.</p>
+
+<h2>The UNIX file system API</h2>
+<dl class="terms">
+  <dt><code>create</code>, <code>link</code>, <code>unlink</code>, <code>createdir</code>, <code>rmdir</code></dt><dd>Create a file, link to it, remove a link; create or remove a directory.</dd>
+  <dt><code>open</code>, <code>close</code>, <code>read</code>, <code>write</code>, <code>seek</code></dt><dd>Open and close a file; <code>seek</code> resets the current position.</dd>
+  <dt><code>fsync</code></dt><dd>File changes can be cached; <code>fsync</code> forces them to disk, like a memory barrier. <code>close</code> does not guarantee that.</dd>
+</dl>
+<p>See <a href="programming-interface.html#unix-i-o">UNIX I/O</a> for why <code>open</code> combines create and open in one atomic call.</p>
+
+<h3>Exercise: timing file operations</h3>
+<p>Create a file, write 100 KB, flush, and delete it, timing each step with <code>gettimeofday()</code>:</p>
+<pre><code>gettimeofday(&amp;start, NULL);
+int fd = creat(argv[1], S_IRUSR | S_IWUSR);   // or open(..., O_CREAT|O_WRONLY|O_TRUNC, ...)
+gettimeofday(&amp;now, NULL);
+
+data = malloc(100 * 1024);
+memset(data, 0x41, 100 * 1024);
+if (write(fd, data, 100 * 1024) != 100 * 1024)
+    perror("Failed to write");
+
+fflush(NULL);          // flush; fsync(fd) makes it durable on the device
+unlink(argv[1]);       // delete the name
+free(data);
+close(fd);</code></pre>
+<p>Check what <code>write</code> returns – it may write fewer bytes than asked. <code>unlink</code> removes the name; if the file is still open, its data stays until the last descriptor is closed. A monotonic clock is better for timing than the wall clock, which can jump.</p>
+
+<h2>Design constraints</h2>
+<ul>
+  <li><strong>Small files:</strong> small blocks for storage efficiency; concurrent operations are more efficient than sequential; files used together should be stored together.</li>
+  <li><strong>Large files:</strong> large blocks; contiguous allocation for sequential access; efficient lookup for random access.</li>
+  <li>When a file is created, you may not know whether it will be small or large, persistent or temporary, or used sequentially or randomly.</li>
+</ul>
+<p>A file system needs:</p>
+<ul>
+  <li><strong>Directories</strong>: file name → file metadata. Directories are stored as files.</li>
+  <li><strong>File metadata</strong>: how to find the file's data blocks.</li>
+  <li><strong>A free map</strong>: the list of free blocks.</li>
+</ul>
+<p>The design challenges are the index structure (how to find a file's blocks), index granularity (block size), free space, locality, and reliability after a crash mid-operation.</p>
+
+<h2>Three designs</h2>
+<table>
+<thead><tr><th></th><th>FAT</th><th>FFS</th><th>NTFS</th></tr></thead>
+<tbody>
+<tr><td>Index structure</td><td>Linked list</td><td>Tree (fixed, asymmetric)</td><td>Tree (dynamic)</td></tr>
+<tr><td>Granularity</td><td>Block</td><td>Block</td><td>Extent</td></tr>
+<tr><td>Free space</td><td>FAT array</td><td>Bitmap (fixed location)</td><td>Bitmap (a file)</td></tr>
+<tr><td>Locality</td><td>Defragmentation</td><td>Block groups, reserve space</td><td>Extents, best fit, defrag</td></tr>
+</tbody>
+</table>
+
+<h2>FAT</h2>
+<p>Microsoft's File Allocation Table is a linear map of all blocks on disk. Each file is a linked list of blocks: the file's entry points to its first block, and each FAT entry points to the next. Simple and still widely used, e.g. on USB drives and cameras.</p>
+<table>
+<thead><tr><th>Pros</th><th>Cons</th></tr></thead>
+<tbody><tr>
+<td>Easy to find a free block, append to a file, delete a file.</td>
+<td>Small file access is slow; random access is very slow (follow the list); fragmentation – a file's blocks and a directory's files get scattered, worse as the disk fills.</td>
+</tr></tbody>
+</table>
+<p><strong>Volume size:</strong> FAT32 entries are 32 bits with 4 reserved, so 28 bits address blocks. With 4096-byte blocks the largest volume is 2<sup>28</sup> × 2<sup>12</sup> = 2<sup>40</sup> bytes = 1 TB. (The 2024 solution also mentions the 4 GB maximum file size.)</p>
+<p>For an embedded device such as a camera, FAT is the better fit: it is simple and cheap to implement, and the camera mostly appends files and doesn't need owners, permissions or journalling.</p>
+
+<h2>FFS (Berkeley Fast File System)</h2>
+<p>FFS keeps an <strong>inode table</strong> – an array of inodes, analogous to the FAT table. An <dfn>inode</dfn> holds the file's metadata (owner, group, permissions such as set-uid, access times, and so on – but not its name or parent directory, which live in directories) and pointers to its data:</p>
+<table>
+<thead><tr><th>Pointers (4 KB blocks)</th><th class="num">Reaches</th></tr></thead>
+<tbody>
+<tr><td>12 direct pointers</td><td class="num">48 KB</td></tr>
+<tr><td>1 indirect pointer → a block of 1K pointers</td><td class="num">+ 4 MB</td></tr>
+<tr><td>1 doubly indirect → 1K indirect blocks</td><td class="num">+ 4 GB</td></tr>
+<tr><td>1 triply indirect → 1K doubly indirect</td><td class="num">+ 4 TB</td></tr>
+</tbody>
+</table>
+<p>This is an <strong>asymmetric tree</strong>: small files have a shallow tree and are stored efficiently; large files get a deep tree with efficient random access; sparse files only fill in the pointers they need.</p>
+<p>Permissions are per file, stored in the inode.</p>
+
+<h3>Locality</h3>
+<ul>
+  <li><strong>Block groups:</strong> sets of nearby cylinders. Files in the same directory go in the same group; subdirectories go in different groups.</li>
+  <li>The inode table is spread across the disk, so inodes and the free bitmap are near the file blocks.</li>
+  <li><strong>First-fit allocation:</strong> small files may be fragmented, large files are mostly contiguous.</li>
+</ul>
+<p>The 2024 exam (Q25) uses this: <code>file /a 4</code>, <code>file /b 2</code> put a and b in group 0; <code>dir /c</code> starts group 1; after <code>delete /c</code> and <code>file /c 3</code>, c is a file in / and goes back to group 0.</p>
+<table>
+<thead><tr><th>Pros</th><th>Cons</th></tr></thead>
+<tbody><tr>
+<td>Efficient storage for small and large files; locality for small and large files; locality for metadata and data.</td>
+<td>Inefficient for tiny files (a 1-byte file needs an inode and a data block); inefficient when a file is mostly contiguous (no equivalent of superpages); 10–20% of space must stay free to prevent fragmentation.</td>
+</tr></tbody>
+</table>
+
+<h2>NTFS</h2>
+<ul>
+  <li>A <strong>Master File Table</strong> (MFT) with flexible 1 KB records for metadata – and for the data itself if the file is small. A file's name is stored in its MFT record.</li>
+  <li><strong>Extents:</strong> block pointers that cover runs of blocks (Linux ext4 does the same). When creating a file, a hint about its size can be given.</li>
+  <li><strong>Journalling</strong> for reliability.</li>
+</ul>
+<p>Small files fit in their MFT record; medium files have a list of extents; large files use indirect MFT records.</p>
+
+<h2>Directories</h2>
+<p>Directories are stored as files. Looking up a path is recursive: read the root directory to find the next name's inode, read that directory, and so on. Small directories use a linear search; large directories use a B-tree.</p>

@@ -1,0 +1,125 @@
+<p class="summary">How the OS decides what runs next. Definitions of response time, turnaround and wait time; FIFO, shortest job first, round robin, max-min fairness and the multi-level feedback queue; and scheduling on multiprocessors.</p>
+
+<h2>Definitions</h2>
+<dl class="terms">
+  <dt>Task (job)</dt><dd>A user request: a mouse click, a web request, a shell command.</dd>
+  <dt>Latency (response time)</dt><dd>How long a task takes to complete.</dd>
+  <dt>Throughput</dt><dd>How many tasks are done per unit of time.</dd>
+  <dt>Overhead</dt><dd>How much extra work the scheduler does.</dd>
+  <dt>Fairness</dt><dd>How equal the performance is for different users.</dd>
+  <dt>Predictability</dt><dd>How consistent the performance is over time.</dd>
+  <dt>Workload</dt><dd>The set of tasks the system must perform.</dd>
+  <dt>Preemptive scheduler</dt><dd>Can take resources away from a running task.</dd>
+  <dt>Work-conserving</dt><dd>The resource is used whenever there is a task to run.</dd>
+</dl>
+<p>The lecture only considers preemptive, work-conserving schedulers.</p>
+
+<h3>The three times you calculate</h3>
+<p>The exercises and exams use these definitions (as in the OSTEP simulator):</p>
+<dl class="terms">
+  <dt>Response time</dt><dd>Time from arrival until the task <em>first</em> runs.</dd>
+  <dt>Turnaround time</dt><dd>Time from arrival until the task completes.</dd>
+  <dt>Wait time</dt><dd>Time spent in the ready queue, not running = turnaround − run time.</dd>
+</dl>
+<p class="note">Careful: the lecture slides use “response time” for time to complete. The exam questions always define the terms, so read the definition given.</p>
+
+<h2>FIFO</h2>
+<p>Run tasks in the order they arrive, until they complete or give up the processor. Simple, with minimal overhead (memcached works this way). Bad when a long task arrives before short ones: everyone waits behind it.</p>
+
+<h2>Shortest job first</h2>
+<p>Always run the task with the shortest <em>remaining</em> work (also called shortest remaining time first, SRTF). It is optimal for average response time: running a short task first delays the long ones a little but saves the short ones a lot. Downsides:</p>
+<ul>
+  <li>It needs to know how long each task will run, which a real scheduler can't.</li>
+  <li>Long tasks can starve if short ones keep arriving.</li>
+  <li>It is pessimal for variance in response time.</li>
+</ul>
+
+<h3>Worked example</h3>
+<p>Jobs of length 100, 10 and 10 arrive at time 0.</p>
+<table>
+<thead><tr><th>Policy</th><th>Order</th><th>Completion times</th><th class="num">Average turnaround</th></tr></thead>
+<tbody>
+<tr><td>FIFO</td><td>100, 10, 10</td><td>100, 110, 120</td><td class="num">110</td></tr>
+<tr><td>SJF</td><td>10, 10, 100</td><td>10, 20, 120</td><td class="num">50</td></tr>
+</tbody>
+</table>
+
+<h2>Round robin</h2>
+<p>Each task gets the resource for a fixed time quantum; if it isn't done, it goes to the back of the line.</p>
+<ul>
+  <li><strong>Short quantum:</strong> high responsiveness, but each job progresses slowly and a lot of time goes to context switches (user → kernel → user). With a quantum of one instruction, almost all the time is overhead.</li>
+  <li><strong>Long quantum:</strong> lower responsiveness and less overhead; each process gets more work done per turn. With an infinite quantum, round robin is FIFO.</li>
+</ul>
+<p>Round robin approximates SJF when tasks vary in size, because short tasks finish in their first few turns. But when tasks are all the same size it has very poor average completion time: they all finish near the end. Three 10-tick jobs: FIFO gives an average response time of 10 and turnaround of 20; RR with quantum 1 gives response 1 and turnaround 29.</p>
+
+<h3>Worked example (2023 exam)</h3>
+<p>Tasks of length 20, 1, 5 and 2 arrive at t = 0. Quantum 2:</p>
+<pre><code>0–2  task 1      7–9   task 1     14–28  task 1 (done)
+2–3  task 2 done 9–11  task 3
+3–5  task 3      11–13 task 1
+5–7  task 4 done 13–14 task 3 done</code></pre>
+<table>
+<thead><tr><th>Task</th><th class="num">Length</th><th class="num">First runs</th><th class="num">Completes</th><th class="num">Wait</th></tr></thead>
+<tbody>
+<tr><td>1</td><td class="num">20</td><td class="num">0</td><td class="num">28</td><td class="num">8</td></tr>
+<tr><td>2</td><td class="num">1</td><td class="num">2</td><td class="num">3</td><td class="num">2</td></tr>
+<tr><td>3</td><td class="num">5</td><td class="num">3</td><td class="num">14</td><td class="num">9</td></tr>
+<tr><td>4</td><td class="num">2</td><td class="num">5</td><td class="num">7</td><td class="num">5</td></tr>
+<tr><td><strong>Average</strong></td><td></td><td class="num">2.5</td><td class="num">13</td><td class="num">6</td></tr>
+</tbody>
+</table>
+<p>With quantum 5 the averages are 5.5, 14.5 and 7.5. Check your own answers with the OSTEP simulator: <code>./scheduler.py -p RR -l 20,1,5,2 -q 2 -c</code>.</p>
+
+<h2>Fairness</h2>
+<p>Is round robin always fair? It depends on what “fair” means: FIFO order, equal CPU shares, or minimising the worst-case slowdown compared with running alone. Tasks that mix processor use and I/O benefit from SJF and can do poorly under round robin.</p>
+<p><dfn>Max-min fairness</dfn> maximises the minimum allocation any task gets. If a task needs less than an equal share, schedule the smallest of those first, then split the remaining time using max-min. If all remaining tasks need at least an equal share, split evenly. This improves response time for I/O-bound tasks.</p>
+
+<h3>Measuring correctly</h3>
+<p>If you compare schedulers by measuring average response time over the tasks that completed between start and stop, the comparison is biased: a scheduler that starves long tasks simply leaves them out of the average. Measure until completed tasks far outnumber uncompleted ones, or start and stop in idle periods.</p>
+
+<h2>Multi-level feedback queue</h2>
+<p>Goals: responsiveness, low overhead, starvation freedom, some high- and low-priority tasks, and fairness among equal-priority tasks. It is not perfect at any of them, but it is used in Linux (and probably Windows and macOS).</p>
+<ul>
+  <li>A set of round robin queues, each with its own priority.</li>
+  <li>High-priority queues have short time slices; low-priority queues have long ones.</li>
+  <li>The scheduler picks the first thread in the highest-priority non-empty queue.</li>
+  <li>Tasks start in the highest-priority queue. If a task uses up its time slice, it drops one level. A task that blocks for I/O stays high.</li>
+</ul>
+<p>Because the scheduler can't see how long a job will run, MLFQ learns from recent behaviour, approximating SJF. A steady stream of short jobs can still starve a long job at the bottom. A <strong>priority boost</strong> – periodically moving every job back to the top queue – prevents that.</p>
+<p>Exercise: two 30-tick jobs, three queues, quantum 10. Both use their whole slice at each level and drop together, so they run in lockstep: response times 0 and 10, turnaround 50 and 60.</p>
+
+<h2>Summary of uniprocessor policies</h2>
+<ul>
+  <li>FIFO is simple and minimises overhead.</li>
+  <li>If tasks vary in size, FIFO can have very poor average response time. If they are equal in size, FIFO is optimal.</li>
+  <li>Considering only the processor, SJF is optimal for average response time, but pessimal for variance.</li>
+  <li>If tasks vary in size, round robin approximates SJF. If they are equal, it is very poor.</li>
+  <li>Tasks that mix CPU and I/O benefit from SJF and can do poorly under round robin.</li>
+  <li>Max-min fairness improves response time for I/O-bound tasks.</li>
+  <li>Round robin and max-min fairness both avoid starvation.</li>
+  <li>By assigning tasks to priority queues, MLFQ balances responsiveness, low overhead and fairness.</li>
+</ul>
+
+<h2>Multiprocessor scheduling</h2>
+<p>Running one MFQ for all processors causes contention on the scheduler's spinlock, cache slowdowns as the ready list moves between CPUs, and poor cache reuse, since a thread's data is often still in the cache of the CPU it last ran on.</p>
+<p><strong>Per-processor affinity scheduling:</strong> each processor has its own ready list, protected by a per-processor spinlock. A thread goes back on the list of the CPU where it last ran (for example when I/O completes or on a condition variable signal). Idle processors can steal work from others.</p>
+
+<h3>Parallel programs</h3>
+<p>If one thread of a parallel program is time-sliced while the others run, the program is still correct (it uses locks and condition variables), but performance suffers: in <em>bulk synchronous parallelism</em> every processor computes, waits at a barrier, exchanges data and waits again (MapReduce, fluid flow over a wing), so the slowest thread decides the speed. The tail latency matters.</p>
+<dl class="terms">
+  <dt>Oblivious scheduling</dt><dd>Each processor time-slices its ready list independently.</dd>
+  <dt>Gang scheduling</dt><dd>Run all threads of a program at the same time on different processors.</dd>
+  <dt>Space sharing</dt><dd>Give each program its own set of processors. With <em>scheduler activations</em>, the kernel tells each application by upcall how many processors it has whenever that changes.</dd>
+</dl>
+
+<h2>Practising with the OSTEP simulators</h2>
+<pre><code>git clone https://github.com/remzi-arpacidusseau/ostep-homework
+cd ostep-homework/cpu-sched
+./scheduler.py -p FIFO -l 5,5,5,5,100
+./scheduler.py -p SJF  -l 5,5,5,5,100
+./scheduler.py -p RR   -l 5,5,5,5,100 -q 1
+./scheduler.py -p RR   -l 5,5,5,5,100 -q 10
+
+cd ../cpu-sched-mlfq
+./mlfq.py --jlist 0,5,0:0,5,0:0,5,0:0,5,0:0,100,0 -q 10</code></pre>
+<p>Work out the answers by hand first, then add <code>-c</code> to check.</p>

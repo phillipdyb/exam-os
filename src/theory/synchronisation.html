@@ -1,0 +1,249 @@
+<p class="summary">Why threads that share memory need synchronisation, and the tools for it: locks, condition variables and semaphores. Includes how they are implemented with interrupts, spinlocks and atomic instructions, and the pthread versions you write on the exam.</p>
+
+<h2>The problem</h2>
+<p>When threads read and write shared memory concurrently, program behaviour is undefined:</p>
+<ul>
+  <li>Two threads write the same variable – which one wins?</li>
+  <li>The thread schedule is non-deterministic, so behaviour changes when you rerun the program.</li>
+  <li>Compilers and CPUs reorder instructions.</li>
+  <li>Multi-word operations are not atomic.</li>
+</ul>
+<p>Even <code>balance++</code> is several instructions: load, add, store. Two threads can both load the old value, and one increment is lost.</p>
+
+<h3>Reordering and memory barriers</h3>
+<p>Compilers reorder instructions because efficient code generation depends on analysing control and data dependencies; if variables could change spontaneously, most optimisations would be impossible. CPUs reorder because of write buffering: the next instruction can run while a write completes.</p>
+<p>The fix is a <dfn>memory barrier</dfn>: an instruction that prevents reordering memory accesses across it. All operations before the barrier complete before it returns, and none after it start until it returns.</p>
+
+<h2>Definitions</h2>
+<dl class="terms">
+  <dt>Race condition</dt><dd>The output of a concurrent program depends on the order of operations between threads.</dd>
+  <dt>Mutual exclusion</dt><dd>Only one thread does a particular thing at a time.</dd>
+  <dt>Critical section</dt><dd>A piece of code only one thread can execute at once.</dd>
+  <dt>Lock</dt><dd>Prevents someone from doing something. Lock before entering a critical section and before accessing shared data; unlock when leaving. Wait if locked – all synchronisation involves waiting.</dd>
+</dl>
+
+<h2>Too much milk</h2>
+<p>Two roommates both find the fridge empty and both buy milk. The correctness properties:</p>
+<ul>
+  <li><strong>Liveness:</strong> someone buys milk if needed.</li>
+  <li><strong>Safety:</strong> at most one person buys.</li>
+</ul>
+<p>Solutions with notes are surprisingly hard. Leaving one note (try 1) can still lead to two purchases; two notes (try 2) can lead to none. Try 3 works, but it is asymmetric, busy-waits, and gets even harder for more threads (see Peterson's algorithm). Lessons: the “obvious” code often has bugs, reordering makes reasoning even harder, and many threads make it worse. With a lock it's simple:</p>
+<pre><code>lock.acquire();
+if (!milk)
+    buy milk
+lock.release();</code></pre>
+
+<h2>Locks</h2>
+<dl class="terms">
+  <dt><code>acquire</code></dt><dd>Wait until the lock is free, then take it.</dd>
+  <dt><code>release</code></dt><dd>Release the lock, waking up anyone waiting for it.</dd>
+</dl>
+<p>Properties: at most one holder at a time (safety); if nobody holds it, acquire gets it (progress); if all holders finish and no higher-priority waiters exist, a waiter eventually gets it (progress).</p>
+<p>Why only acquire and release? If a lock had an “is it free?” method that returned true, by the time you used the answer the lock might already be taken. You don't know.</p>
+
+<h3>Rules for using locks</h3>
+<ul>
+  <li>The lock is initially free.</li>
+  <li>Always acquire before accessing a shared data structure – at the beginning of the procedure.</li>
+  <li>Always release after finishing with the shared data – at the end of the procedure.</li>
+  <li>Only the lock holder can release. Don't throw the lock to someone else to release.</li>
+  <li>Never access shared data without the lock.</li>
+</ul>
+
+<h3>Locks with pthreads</h3>
+<pre><code>pthread_mutex_t lock;
+int balance = 0;
+
+void *deposit(void *arg) {
+    for (int i = 0; i &lt; 1000000; i++) {
+        pthread_mutex_lock(&amp;lock);
+        balance++;                      // critical section
+        pthread_mutex_unlock(&amp;lock);
+    }
+    return NULL;
+}
+
+int main() {
+    pthread_mutex_init(&amp;lock, NULL);
+    /* create threads with pthread_create, then pthread_join them */
+}</code></pre>
+<p>A mutex can also be initialised statically with <code>PTHREAD_MUTEX_INITIALIZER</code>. Calling <code>pthread_mutex_lock</code> twice from the same thread deadlocks it with itself: a default mutex is not recursive (use <code>PTHREAD_MUTEX_RECURSIVE</code> or restructure).</p>
+
+<h3>Keep the critical section small</h3>
+<p>Lock only the part that touches shared state. In <code>mutex-better.c</code> only the counter update and the copy into a local job number are locked; the long loop runs outside the lock:</p>
+<pre><code>pthread_mutex_lock(&amp;lock);
+counter += 1;
+int jobno = counter;
+pthread_mutex_unlock(&amp;lock);
+
+printf("\n Job %d has started\n", jobno);
+for(i=0; i&lt;(0xFFFFFFFF);i++);
+printf("\n Job %d has finished\n", jobno);</code></pre>
+<p>In the 2023 exam, ten threads each sum a range and add it to a global <code>sum</code>. The minimal critical section is just <code>sum = sum + localsum</code>, protected by a mutex; the summing happens in a local variable.</p>
+
+<div class="exam-tip"><span class="tip-label">Spot the race</span>
+<p>Look for variables shared between threads (globals, heap memory passed to several threads) that are written by at least one of them. In <code>threadHello-unsafe.c</code> it is <code>bankbalance += (long)n;</code>; in the threaded server it is <code>shared_line_counter</code>. A race may run correctly thousands of times before it fails, so “it worked when I tried it” proves nothing.</p></div>
+
+<h2>Condition variables</h2>
+<p>A lock gives mutual exclusion, but no way to wait for another thread to change shared state. A <dfn>condition variable</dfn> lets a thread wait inside a critical section:</p>
+<dl class="terms">
+  <dt><code>wait(&amp;lock)</code></dt><dd>Atomically release the lock and give up the processor. Reacquire the lock when woken.</dd>
+  <dt><code>signal()</code></dt><dd>Wake up one waiter, if any.</dd>
+  <dt><code>broadcast()</code></dt><dd>Wake up all waiters, if any.</dd>
+</dl>
+
+<h3>Design pattern</h3>
+<pre><code>methodThatWaits() {                 methodThatSignals() {
+    lock.acquire();                     lock.acquire();
+    // read/write shared state          // read/write shared state
+    while (!testSharedState()) {        // if testSharedState is now true
+        cv.wait(&amp;lock);                 cv.signal(&amp;lock);
+    }                                   // read/write shared state
+    // read/write shared state          lock.release();
+    lock.release();                 }
+}</code></pre>
+<ul>
+  <li><strong>Always hold the lock</strong> when calling wait, signal or broadcast. The condition variable is for synchronising on shared state, and you always hold the lock when accessing shared state.</li>
+  <li><strong>Condition variables are memoryless.</strong> A signal with no waiter does nothing. A wait always waits, even if a signal came earlier.</li>
+  <li><strong>Wait atomically releases the lock.</strong> Wait-then-release would sleep holding the lock; release-then-wait could miss a signal that comes in between.</li>
+  <li><strong>Wait must be in a while loop.</strong> A woken thread is just put on the ready list; another thread may take the lock first and change the state. Implementations (Java, POSIX) also allow spurious wakeups.</li>
+</ul>
+
+<h3>Bounded buffer</h3>
+<pre><code>get() {                             put(item) {
+    lock.acquire();                     lock.acquire();
+    while (front == tail) {             while ((tail - front) == MAX) {
+        empty.wait(lock);                   full.wait(lock);
+    }                                   }
+    item = buf[front % MAX];            buf[tail % MAX] = item;
+    front++;                            tail++;
+    full.signal(lock);                  empty.signal(lock);
+    lock.release();                     lock.release();
+    return item;                    }
+}
+// Initially: front = tail = 0; MAX is buffer capacity
+// empty and full are condition variables</code></pre>
+<p>At every lock acquire, return from wait and lock release, the invariants <code>front &lt;= tail</code> and <code>front + MAX &gt;= tail</code> hold. That's what makes the code provably correct.</p>
+
+<h3>Mesa and Hoare semantics</h3>
+<dl class="terms">
+  <dt>Mesa</dt><dd>Signal puts the waiter on the ready list; the signaller keeps the lock and processor. Used in practice, and why wait must be in a loop.</dd>
+  <dt>Hoare</dt><dd>Signal gives the processor and lock to the waiter; when the waiter finishes, they go back to the signaller. Nested signals are possible, and <code>if</code> instead of <code>while</code> would be enough.</dd>
+</dl>
+<p>A FIFO bounded buffer under Mesa semantics uses one condition variable per waiter, kept in a queue, so signal wakes the front of the queue.</p>
+
+<h3>Condition variables with pthreads</h3>
+<pre><code>pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+int ready = 0;
+
+// waiting thread
+pthread_mutex_lock(&amp;mut);
+while (!ready)
+    pthread_cond_wait(&amp;cond, &amp;mut);
+pthread_mutex_unlock(&amp;mut);
+
+// signalling thread
+pthread_mutex_lock(&amp;mut);
+ready = 1;
+pthread_cond_signal(&amp;cond);       // or pthread_cond_broadcast
+pthread_mutex_unlock(&amp;mut);</code></pre>
+<p>The 2025 exam (Q21) asks for the print order of two threads using two such flags. Trace it by hand: who runs first, where each thread blocks in <code>pthread_cond_wait</code>, and which signal wakes it.</p>
+
+<h2>Semaphores</h2>
+<p>A semaphore has a non-negative integer value and two atomic operations:</p>
+<dl class="terms">
+  <dt><code>P()</code> (<code>sem_wait</code>)</dt><dd>Wait for the value to become greater than 0, then decrement it.</dd>
+  <dt><code>V()</code> (<code>sem_post</code>)</dt><dd>Increment the value, waking up a waiter if needed.</dd>
+</dl>
+<p>If the value is 1, two P's leave value 0 and one waiter. A semaphore initialised to 1 behaves like a lock; a higher value lets n threads in at once. Unlike a condition variable, a semaphore remembers how many times V was called. Semaphores are useful for unlocked waits: interrupt handlers, fork/join.</p>
+<pre><code>sem_t mutex;
+
+void *thread(void *arg) {
+    sem_wait(&amp;mutex);
+    printf("\nEntered..\n");
+    sleep(4);                         // critical section
+    printf("\nJust Exiting...\n");
+    sem_post(&amp;mutex);
+}
+
+int main() {
+    sem_init(&amp;mutex, 0, 1);           // initial value 1: acts as a lock
+    /* create two threads, join them */
+    sem_destroy(&amp;mutex);
+}</code></pre>
+
+<h3>Semaphore bounded buffer</h3>
+<pre><code>get() {                    put(item) {
+    fullSlots.P();             emptySlots.P();
+    mutex.P();                 mutex.P();
+    item = buf[front % MAX];   buf[last % MAX] = item;
+    front++;                   last++;
+    mutex.V();                 mutex.V();
+    emptySlots.V();            fullSlots.V();
+    return item;           }
+}
+// Initially: mutex = 1, emptySlots = MAX, fullSlots = 0</code></pre>
+
+<h3>Mutex or semaphore?</h3>
+<p>A mutex has strict ownership: only the thread that locked it can unlock it. A semaphore has no owner, so one thread can wait and another post – which makes it a signalling mechanism as well as a lock. Semaphores are easy to misuse: a wrong order of waits and posts can cause deadlock or break mutual exclusion.</p>
+
+<h2>Implementing synchronisation</h2>
+<h3>Uniprocessor: disable interrupts</h3>
+<p>On one CPU, a thread can only be interrupted by an interrupt. So the lock disables interrupts while it updates its state, and puts waiting threads on a queue instead of spinning:</p>
+<pre><code>Lock::acquire() {                   Lock::release() {
+    disableInterrupts();                disableInterrupts();
+    if (value == BUSY) {                if (!waiting.Empty()) {
+        waiting.add(myTCB);                 next = waiting.remove();
+        myTCB-&gt;state = WAITING;             next-&gt;state = READY;
+        next = readyList.remove();          readyList.add(next);
+        switch(myTCB, next);            } else {
+        myTCB-&gt;state = RUNNING;             value = FREE;
+    } else {                            }
+        value = BUSY;                   enableInterrupts();
+    }                               }
+    enableInterrupts();
+}</code></pre>
+
+<h3>Multiprocessor: atomic read-modify-write</h3>
+<p>Disabling interrupts only affects one CPU. Multiprocessors use instructions that atomically read a value, change it and write it back: test-and-set, Intel's <code>xchgb</code> and <code>lock</code> prefix, compare-and-swap.</p>
+<p>A <dfn>spinlock</dfn> waits in a loop for the lock to become free. It assumes the lock is held briefly, and is used to protect the scheduler and to implement other locks:</p>
+<pre><code>Spinlock::acquire() {
+    while (testAndSet(&amp;lockValue) == BUSY)
+        ;
+}
+Spinlock::release() {
+    lockValue = FREE;
+    memorybarrier();
+}</code></pre>
+<p>One spinlock for the whole kernel would be a bottleneck. Instead: one per lock, one for the scheduler's ready list (or one per core, with per-core ready lists). The multiprocessor lock disables interrupts <em>and</em> takes the lock's spinlock while it updates the lock; a semaphore is implemented the same way, with a counter instead of BUSY/FREE.</p>
+<p>To know which thread is running on a multiprocessor, the kernel uses a dedicated register per CPU or puts a pointer to the TCB at the bottom of each fixed-size stack.</p>
+
+<h3>Linux</h3>
+<p>Most locks are free most of the time, so Linux has a fast path: if the lock is free and nobody is waiting, acquiring and releasing each take two instructions (an atomic decrement of a counter: 1 unlocked, 0 locked, negative locked with possible waiters). Otherwise it takes the slow path. User-level locks use test-and-set for the fast path and a system call to a kernel lock for the slow path.</p>
+
+<h3>Condition variables from semaphores</h3>
+<p>Naively, <code>wait</code> releases the lock, calls <code>semaphore.P()</code> and reacquires; <code>signal</code> calls <code>semaphore.V()</code>. This is wrong, because V is remembered even if nobody waits, unlike a signal. Checking “if anyone is waiting” first is still racy. The working version gives each waiter its own semaphore in a queue; signal removes one and calls V on it.</p>
+
+<h2>Communicating sequential processes</h2>
+<p>An alternative to shared memory (used in Go): one thread per shared object, which is the only thread allowed to touch its data. Calling a method means sending that thread a message and waiting for the reply. No memory races.</p>
+<table>
+<thead><tr><th>Locks and condition variables</th><th>CSP</th></tr></thead>
+<tbody>
+<tr><td>Create a lock on shared data</td><td>Create a single thread to operate on the data</td></tr>
+<tr><td>Call a method on a shared object</td><td>Send a message and wait for the reply</td></tr>
+<tr><td>Wait for a condition</td><td>Queue an operation that can't complete yet</td></tr>
+<tr><td>Signal a condition</td><td>Perform a queued operation that is now possible</td></tr>
+</tbody>
+</table>
+
+<h2>Remember the rules</h2>
+<ul>
+  <li>Use a consistent structure.</li>
+  <li>Always use locks and condition variables.</li>
+  <li>Always acquire the lock at the beginning of a procedure and release it at the end.</li>
+  <li>Always hold the lock when using a condition variable.</li>
+  <li>Always wait in a while loop.</li>
+  <li>Never spin in <code>sleep()</code>.</li>
+</ul>

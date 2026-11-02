@@ -1,0 +1,174 @@
+<p class="summary">The C you need to read and write on the exam, based on the course's own checklist: program structure, input and arguments, pointers, files, processes, threads and synchronisation – with short templates for each.</p>
+
+<h2>The course's checklist</h2>
+<p>For the exam you need to be able to read, understand and write simple C programs. The course lists (not exhaustively):</p>
+<ul>
+  <li>Basic layout and syntax of a <code>.c</code> file</li>
+  <li><code>stdin</code>, <code>stdout</code>, <code>stderr</code></li>
+  <li>Reading user input from stdin and from command-line parameters</li>
+  <li>Control flow: <code>while</code>, <code>for</code>, <code>if</code></li>
+  <li>Basic data types (<code>int</code>, <code>char</code>, <code>void</code>) and pointers to them, with <code>*</code> and <code>&amp;</code></li>
+  <li>Correct use of the libc-wrapped system calls from the lectures: <code>fork()</code>, <code>execve()</code>, <code>wait()</code>, <code>open()</code>, <code>read()</code>, <code>write()</code>, <code>close()</code>, <code>printf()</code>/<code>snprintf()</code>/<code>fprintf()</code>, <code>signal()</code>, <code>malloc()</code>, <code>free()</code>, <code>mmap()</code>, …</li>
+  <li>The structure of a simple shell</li>
+  <li>Correct use of <code>pthread_*</code> functions</li>
+  <li>Correct use of locks, semaphores and condition variables (<code>pthread_mutex_t</code>, <code>sem_t</code>, <code>pthread_cond_t</code>) without causing deadlocks</li>
+  <li>Security implications of C: stack layout, stack buffer overflows, dangerous calls like <code>gets()</code></li>
+</ul>
+<p>Pseudocode is usually accepted, but use the correct function names.</p>
+
+<h2>Program structure and input</h2>
+<pre><code>#include &lt;stdio.h&gt;
+
+int main()
+{
+    int number1;
+    int number2;
+    int sum;
+
+    printf("Enter two integers: ");
+    scanf("%d %d", &amp;number1, &amp;number2);   // &amp; gives scanf the address to write to
+
+    if(number1 &gt; 100 || number2 &gt; 100)
+    {
+        printf("At least one number is too large!\n");
+        return 1;                           // non-zero exit status = error
+    }
+    sum = number1 + number2;
+    printf("Sum of %d and %d is %d\n", number1, number2, sum);
+    return 0;
+}</code></pre>
+<p>Read a whole line safely with <code>fgets(line, sizeof(line), stdin)</code>, never <code>gets</code>. <code>fgets</code> keeps the newline: strip it with <code>line[strcspn(line, "\n")] = '\0';</code>.</p>
+
+<h3>Command-line arguments</h3>
+<p><code>argc</code> is the number of arguments including the program name; <code>argv[0]</code> is the program name and <code>argv[1]</code> the first real argument. Convert numbers with <code>atoi</code> (from <code>&lt;stdlib.h&gt;</code>; returns 0 on error).</p>
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+
+// ./myprog 3 "String"  prints  StringStringString
+int main(int argc, char *argv[])
+{
+    int N = atoi(argv[1]);
+    for (int i=0; i&lt;N; i++)
+    {
+        printf("%s", argv[2]);
+    }
+}</code></pre>
+
+<h2>Pointers and memory</h2>
+<ul>
+  <li><code>&amp;x</code> is the address of <code>x</code>; <code>*p</code> is the value <code>p</code> points to.</li>
+  <li>Local variables live on the stack: <code>void func() { int a; }</code></li>
+  <li>Dynamic memory lives on the heap: <code>void *mem = malloc(256);</code> … <code>free(mem);</code></li>
+  <li>Check <code>malloc</code> for <code>NULL</code> and <code>free</code> what you allocate.</li>
+</ul>
+
+<h2>Files</h2>
+<h3>With the C library</h3>
+<pre><code>#include &lt;stdio.h&gt;
+
+int main()
+{
+    FILE *f = fopen("numbers.txt", "w");   // "r" to read; returns NULL on error
+    for(int i=1; i&lt;=30; i++)
+    {
+        fprintf(f, "%d\n", i);
+    }
+    fclose(f);
+}</code></pre>
+<h3>With system calls</h3>
+<pre><code>#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+
+int fd = open("out.txt", O_CREAT | O_WRONLY | O_TRUNC, S_IRUSR | S_IWUSR);
+if (fd &lt; 0) { perror("open"); return 1; }
+write(fd, buf, len);     // returns bytes written, or -1
+fsync(fd);               // force to disk
+close(fd);
+unlink("out.txt");       // delete</code></pre>
+<p>Print errors to <code>stderr</code> with <code>perror("message")</code> or <code>fprintf(stderr, …)</code>.</p>
+
+<h2>Processes</h2>
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/wait.h&gt;
+
+int main()
+{
+    pid_t pid = fork();
+    if (pid == 0) {                         // child
+        char *args[] = { "ls", "-l", NULL };
+        execvp(args[0], args);              // only returns on error
+        perror(args[0]);
+        exit(1);
+    }
+    wait(NULL);                             // parent: wait for the child
+    printf("parent: child finished\n");
+    return 0;
+}</code></pre>
+<p>Remember: <code>fork</code> returns 0 in the child and the child's PID in the parent. Programs that call <code>fork</code> in a loop create more processes than you expect – draw the process tree. See <a href="programming-interface.html">the programming interface</a> for the shell.</p>
+
+<h2>Signals</h2>
+<pre><code>#include &lt;signal.h&gt;
+
+void handler(int signum) { /* ... */ }
+
+int main()
+{
+    signal(SIGWINCH, handler);
+    while (1)
+        pause();            // sleep until a signal arrives
+}</code></pre>
+
+<h2>Threads</h2>
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;pthread.h&gt;
+#define NUMTHREADS 5
+pthread_t threads[NUMTHREADS];
+
+void *go(void *param)
+{
+    printf("Thread %ld says hello\n", (long)param);
+    pthread_exit(param);                // or: return param;
+}
+
+int main()
+{
+    for (long i = 0; i &lt; NUMTHREADS; i++)
+        pthread_create(&amp;threads[i], NULL, go, (void *)i);
+    for (int i = 0; i &lt; NUMTHREADS; i++) {
+        void *retval;
+        pthread_join(threads[i], &amp;retval);
+        printf("main: thread %d returned %ld\n", i, (long)retval);
+    }
+}</code></pre>
+<p>Compile with <code>gcc -o prog prog.c -lpthread</code>. The four arguments to <code>pthread_create</code>: where to store the thread handle, attributes (<code>NULL</code>), the function to run, and one <code>void *</code> argument.</p>
+
+<h2>Synchronisation</h2>
+<pre><code>// Lock
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_lock(&amp;lock);
+/* critical section */
+pthread_mutex_unlock(&amp;lock);
+
+// Condition variable: always wait in a loop, holding the lock
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_lock(&amp;lock);
+while (!ready)
+    pthread_cond_wait(&amp;cond, &amp;lock);
+pthread_mutex_unlock(&amp;lock);
+
+// Semaphore (#include &lt;semaphore.h&gt;)
+sem_t s;
+sem_init(&amp;s, 0, 1);     // 0 = shared between threads, initial value 1
+sem_wait(&amp;s);
+/* critical section */
+sem_post(&amp;s);
+sem_destroy(&amp;s);</code></pre>
+<p>To avoid deadlock, take multiple locks in the same order in every thread. See <a href="synchronisation.html">synchronisation</a> and <a href="deadlock.html">deadlock</a>.</p>
+
+<h2>Dangerous calls</h2>
+<ul>
+  <li><code>gets(buf)</code> – no length limit; use <code>fgets(buf, sizeof(buf), stdin)</code>.</li>
+  <li>Copying into a fixed-size buffer without checking the length is how the Morris worm got in. See <a href="security.html#buffer-overflows">buffer overflows</a>.</li>
+</ul>

@@ -1,0 +1,130 @@
+<p class="summary">How the kernel runs untrusted code safely: the process abstraction, dual-mode operation, and the three ways into the kernel – interrupts, exceptions and system calls – plus upcalls, the way back out to user programs.</p>
+
+<h2>The problem: protection</h2>
+<p>How do we run code with restricted privileges, either because it is buggy or because it might be malicious? Examples: a script in a web browser, a program downloaded from the internet, or a program you just wrote and haven't tested.</p>
+<p>One approach is to run every instruction in a simulator and only perform the permitted ones (the basic model of JavaScript and other interpreted languages). That is slow. To go faster, the unprivileged code should run directly on the CPU, which needs hardware support.</p>
+
+<h2>The process abstraction</h2>
+<p>A <dfn>process</dfn> is an instance of a program running with limited rights. It consists of:</p>
+<ul>
+  <li>a <strong>thread</strong>: a sequence of instructions within the process (potentially many per process; one for now), and</li>
+  <li>an <strong>address space</strong>: the set of rights of the process – the memory it can access, and other permissions such as which system calls it can make and which files it can access.</li>
+</ul>
+<p>The kernel keeps track of each process in a <dfn>process control block</dfn> (PCB).</p>
+
+<h2>Dual-mode operation</h2>
+<dl class="terms">
+  <dt>Kernel mode</dt><dd>Execution with the full privileges of the hardware: read and write any memory, access any I/O device, any disk sector, send and read any packet.</dd>
+  <dt>User mode</dt><dd>Limited privileges, only those granted by the kernel.</dd>
+</dl>
+<p>On x86 the mode is stored in the EFLAGS register; on MIPS in the status register. Hardware support consists of:</p>
+<ol>
+  <li><strong>Privileged instructions</strong>, available only in kernel mode. If user code tries one, the processor raises an exception.</li>
+  <li><strong>Limits on memory accesses</strong>, so user code cannot overwrite the kernel (base and bounds, later virtual addresses; see <a href="address-translation.html">address translation</a>).</li>
+  <li>A <strong>timer</strong> that periodically interrupts the processor and returns control to the kernel, so it can regain control from a user program stuck in a loop. Only the kernel can set the frequency or defer the interrupt.</li>
+  <li>A <strong>safe way to switch</strong> between user and kernel mode.</li>
+</ol>
+<p>Why not let a “Hello world” program write directly to the screen buffer? Because then any program could overwrite anything on the screen; the kernel copies the string from user memory instead.</p>
+
+<h2>Mode switches</h2>
+<h3>From user mode to kernel mode</h3>
+<dl class="terms">
+  <dt>Interrupts</dt><dd>Triggered by the timer and I/O devices. Asynchronous: unrelated to the instruction being run.</dd>
+  <dt>Exceptions</dt><dd>Triggered by unexpected (or malicious) program behaviour: divide by zero, an illegal memory reference, a privileged instruction in user mode.</dd>
+  <dt>System calls</dt><dd>A request by the program for the kernel to do something on its behalf (a protected procedure call). Only a limited number of very carefully coded entry points.</dd>
+</dl>
+<p>A <dfn>trap</dfn> is the general term for a <em>synchronous</em> transfer from user to kernel mode: system calls and exceptions are caused by the instruction being executed.</p>
+
+<h3>From kernel mode to user mode</h3>
+<ul>
+  <li>Starting a new process or thread: jump to the first instruction.</li>
+  <li>Returning from an interrupt, exception or system call: resume the suspended execution.</li>
+  <li>A process or thread context switch: resume some other process.</li>
+  <li>A user-level upcall (UNIX signal): an asynchronous notification to the user program.</li>
+</ul>
+
+<div class="exam-tip"><span class="tip-label">On the exam</span>
+<p>A trap is a synchronous transfer from user to kernel mode (2023 Q6, 2025 Q10). A timer interrupt is <em>not</em> an exception (2023 Q7). Of <code>char buffer[5];</code>, <code>c++;</code>, <code>int x=5;</code> and <code>printf("me\n");</code>, only <code>printf</code> causes a mode switch, because it ends in a <code>write</code> system call (2023 Q8).</p></div>
+
+<h2>Devices and interrupts</h2>
+<p>Devices run asynchronously from the CPU. With <dfn>polling</dfn> the kernel waits until the I/O is done, wasting CPU cycles; with <dfn>interrupts</dfn> it can do other work in the meantime. An interrupt is an asynchronous signal to the processor that an external event has occurred.</p>
+<p>Devices can move data with <em>programmed I/O</em> (the CPU reads and writes to the device) or <dfn>direct memory access</dfn> (DMA), where the device itself reads and writes memory. A buffer descriptor describes a sequence of DMAs, for example a packet header and body; the kernel keeps a queue of them.</p>
+
+<h2>Taking interrupts safely</h2>
+<dl class="terms">
+  <dt>Interrupt vector</dt><dd>A table set up by the kernel with pointers to the code to run for each event. This limits the entry points into the kernel.</dd>
+  <dt>Interrupt stack</dt><dd>Per processor, in kernel memory. A process or thread usually has both a kernel stack and a user stack. The handler can't use the user stack, because the kernel cannot trust its state.</dd>
+  <dt>Atomic transfer of control</dt><dd>A single instruction changes the program counter, stack pointer, memory protection and mode.</dd>
+  <dt>Transparent restartable execution</dt><dd>The user program does not know an interrupt occurred.</dd>
+  <dt>Interrupt masking</dt><dd>The handler runs with interrupts off, re-enabled when it completes. The kernel can also turn interrupts off, for example while choosing the next thread. On x86, <code>CLI</code> disables and <code>STI</code> enables interrupts, only on the current CPU. This is used to implement <a href="synchronisation.html">synchronisation</a>.</dd>
+</dl>
+<p>Interrupt handlers are non-blocking and run to completion. They do the minimum needed to let the device take the next interrupt, and wake up other threads (in Linux, with a semaphore) to do any real work. The rest of the device driver runs as a kernel thread.</p>
+
+<h3>What x86 does on an interrupt</h3>
+<ol>
+  <li>Save the current stack pointer, program counter and processor status word (condition codes).</li>
+  <li>Switch to the kernel stack and push SP, PC and PSW onto it.</li>
+  <li>Switch to kernel mode.</li>
+  <li>Vector through the interrupt table.</li>
+  <li>The handler saves any registers it might clobber.</li>
+</ol>
+<p>At the end the handler restores the saved registers, then atomically restores the program counter, the program stack and the processor status word, and switches to <em>user</em> mode. The stack pointer is saved twice on the interrupt stack: once by the hardware (the user SP) and once by the handler (the SP in the kernel).</p>
+<p>MIPS does the same with two entry points: the TLB miss handler and everything else. It saves the type (system call, exception, interrupt), the PC, the old mode and interrupt bits, sets kernel mode, disables interrupts and, for memory faults, saves the virtual address.</p>
+
+<h2>System calls</h2>
+<p>A system call goes through a user stub and a kernel stub:</p>
+<ol>
+  <li>The program calls <code>file_open(arg1, arg2)</code> like a normal function.</li>
+  <li>The user stub pushes the system call number (e.g. <code>#SYSCALL_OPEN</code>) and executes a <code>trap</code>.</li>
+  <li>The hardware traps into the kernel's system call handler.</li>
+  <li>The kernel stub copies and checks the arguments, calls the real <code>file_open</code>, and copies the return value into user memory.</li>
+  <li>The kernel returns from the trap; the user stub returns to the program.</li>
+</ol>
+<p>The kernel's system call handler must:</p>
+<ul>
+  <li><strong>Locate</strong> the arguments, in registers or on the user stack, translating user addresses into kernel addresses.</li>
+  <li><strong>Copy</strong> the arguments from user memory into kernel memory, to protect the kernel from malicious code changing them after they were checked.</li>
+  <li><strong>Validate</strong> the arguments, to protect the kernel from errors in user code.</li>
+  <li><strong>Copy results back</strong> into user memory.</li>
+</ul>
+<p>The course example <code>syscall_args.c</code> shows the checks in action: <code>read</code> on fd 9999, on the address <code>0xDEADBEEF</code>, or with a count of −1 returns an error and sets <code>errno</code> instead of crashing the kernel.</p>
+
+<h2>Upcalls (signals)</h2>
+<p>An <dfn>upcall</dfn> is user-level event delivery: the kernel notifies a user process of an event that needs handling right away. Uses include timer expiration (real-time UIs, time slices for a user-level thread manager), interrupt delivery to a VM player, and asynchronous I/O completion. In UNIX, upcalls are <strong>signals</strong>.</p>
+<p>Upcalls mirror interrupts:</p>
+<table>
+<thead><tr><th>Upcall</th><th>Interrupt</th></tr></thead>
+<tbody>
+<tr><td>Signal handlers</td><td>Interrupt vector</td></tr>
+<tr><td>Signal stack</td><td>Interrupt stack</td></tr>
+<tr><td>Automatic save and restore of registers</td><td>Transparent resume</td></tr>
+<tr><td>Signal masking: signals disabled while in the handler</td><td>Interrupts disabled in the handler</td></tr>
+</tbody>
+</table>
+<pre><code>#include &lt;signal.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+
+void handler(int num)
+{
+    printf("We caught a signal %d\n", num);
+}
+
+int main()
+{
+    signal(SIGTERM, handler);
+    signal(SIGUSR1, handler);
+    signal(SIGSEGV, handler);
+    while (1)
+    {
+        printf("Sleeping for 5 seconds...\n");
+        sleep(5);
+    }
+}</code></pre>
+<p>In the signals exercise you handle <code>SIGWINCH</code> (window size changed), read the size with <code>ioctl(0, TIOCGWINSZ, &amp;w)</code>, and print it in the middle of the terminal using ANSI escape codes. Use <code>pause()</code> instead of <code>sleep</code> to wait for a signal, and <code>fflush(0)</code> to print without a newline.</p>
+
+<h2>Virtual machines</h2>
+<p>A user-level VM player (such as VM Player) needs to catch privileged instructions, interrupts and device I/O. It installs a kernel driver, which requires administrator privileges and modifies the interrupt table: if an interrupt is for the VM, it is delivered by upcall; otherwise the original table is reinstalled and the kernel resumes. So an upcall from the host kernel to the VM player is analogous to an interrupt from a hardware device to the CPU.</p>
+
+<h2>Kernel structure</h2>
+<p>A portable kernel sits between the system call interface (with portable OS libraries above it) and a hardware abstraction layer for x86, ARM, PowerPC and so on, with device drivers for networks, disks and graphics below. A <dfn>microkernel</dfn> follows the philosophy “what can be at user level, should be”.</p>

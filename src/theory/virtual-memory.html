@@ -1,0 +1,133 @@
+<p class="summary">Caches, demand paging and memory-mapped files, and how to choose which page to evict: FIFO, MIN, LRU, LFU and the clock algorithm. Ends with working sets, thrashing and Zipf workloads.</p>
+
+<h2>Caching basics</h2>
+<dl class="terms">
+  <dt>Cache</dt><dd>A copy of data that is faster to access than the original. A <em>hit</em> if the cache has a copy, a <em>miss</em> if it doesn't.</dd>
+  <dt>Cache block</dt><dd>The unit of cache storage (several memory locations).</dd>
+  <dt>Temporal locality</dt><dd>Programs tend to reference the same memory locations again: memory accessed recently is likely to be used again soon. Example: instructions in a loop.</dd>
+  <dt>Spatial locality</dt><dd>Programs tend to reference nearby locations. Example: data in a loop.</dd>
+  <dt>Write-through</dt><dd>Changes are sent immediately to the next level of storage.</dd>
+  <dt>Write-back</dt><dd>Changes stay in the cache until the cache block is replaced.</dd>
+</dl>
+
+<h3>Cache lookup</h3>
+<ul>
+  <li><strong>Fully associative:</strong> a block can go anywhere; check every entry.</li>
+  <li><strong>Direct mapped:</strong> each address can go in exactly one place, so there's no replacement choice.</li>
+  <li><strong>Set associative:</strong> each address maps to a small set of places.</li>
+</ul>
+<p><strong>Page colouring:</strong> when the cache is much bigger than a page (say an 8 MB cache and 4 KB pages), many pages map to the same cache lines – one in every 2K pages lands in the same place. The OS can assign physical pages so that a process's pages spread evenly over the cache.</p>
+
+<h2>Hardware translation as a power tool</h2>
+<p>Because the kernel can make the hardware trap on a read or write to selected addresses, it can implement: copy-on-write, fill on reference, zero on use, demand-paged virtual memory, memory-mapped files, and emulated modified and use bits.</p>
+
+<h2>Demand paging</h2>
+<p>Can we give the illusion of near-infinite memory with limited physical memory? Keep only the pages in use in memory, and bring others in from disk when referenced:</p>
+<ol>
+  <li>TLB miss</li>
+  <li>Page table walk</li>
+  <li>Page fault (the page is invalid in the page table)</li>
+  <li>Trap to the kernel</li>
+  <li>Convert the virtual address to a file and offset</li>
+  <li>Allocate a page frame, evicting a page if needed</li>
+  <li>Start reading the disk block into the frame</li>
+  <li>Disk interrupt when the DMA is complete</li>
+  <li>Mark the page as valid</li>
+  <li>Resume the process at the faulting instruction</li>
+  <li>TLB miss</li>
+  <li>Page table walk to fetch the translation</li>
+  <li>Execute the instruction</li>
+</ol>
+<p>Page faults are normal and happen all the time.</p>
+
+<h3>Evicting a page</h3>
+<ol>
+  <li>Select an old page to evict.</li>
+  <li>Find all page table entries that refer to it (the frame may be shared), and set each one invalid.</li>
+  <li>Remove any TLB entries that are copies of those entries.</li>
+  <li>Write the page back to disk if it was changed.</li>
+</ol>
+
+<h3>Dirty and use bits</h3>
+<p>Each page table entry has bookkeeping bits, set by the hardware: <strong>modified (dirty)</strong> on a store, and <strong>recently used</strong> on every TLB miss. The kernel resets them when it writes the page to disk, or to track recent use. A physical page is modified if any page table entry pointing to it is modified. On MIPS it's simpler to keep these bits in the core map (the map of physical frames).</p>
+<p>If the hardware has no modified bit, the kernel can emulate one: mark clean pages read-only; on the first write, trap, set the modified bit, mark the page read-write and resume. A recently-used bit can be emulated the same way by marking unused pages invalid. Either way, the kernel must track both the current permission and the true one.</p>
+
+<h2>Memory-mapped files</h2>
+<p>Two ways for an application to do file I/O:</p>
+<ul>
+  <li><strong>Explicit read/write system calls:</strong> data is copied into the process, the application works on it, and it is copied back to the kernel.</li>
+  <li><strong>Memory-mapped files (<code>mmap</code>):</strong> open the file as a memory segment and use load and store instructions on it. A page fault brings in any part that isn't in memory yet.</li>
+</ul>
+<p>Advantages of memory mapping:</p>
+<ul>
+  <li>Simpler programming, especially for large files.</li>
+  <li><strong>Zero-copy I/O:</strong> data goes from disk straight into the page frame.</li>
+  <li><strong>Pipelining:</strong> the process can start before all pages are loaded.</li>
+  <li><strong>Interprocess communication:</strong> a shared memory segment instead of a temporary file.</li>
+</ul>
+<p>Taken further, every segment of a process can be backed by a file: code by the executable, data, heap and stack by temporary files, shared libraries by their code file. That unifies memory management for the file buffer and process memory.</p>
+<p>In the <code>fileread_multi.c</code> exercise, sequential reads take about the same time with <code>fread</code> and <code>mmap</code>. Random reads punish the system-call path, because every <code>fseek</code>, <code>fread</code> and <code>write</code> crosses into the kernel. All runs share the kernel's page cache, so a rerun is faster unless you drop the cache first.</p>
+
+<h2>First touch</h2>
+<p>Declaring a 256 MiB array only reserves virtual address space; the resident set (VmRSS) stays at a few MB. In <code>firsttouch.c</code> the first pass over the array is slow because every page faults and the kernel allocates and zeroes a fresh frame (<a href="address-translation.html#zero-on-reference">zero-on-reference</a>). VmRSS jumps to about 256 MB. The second pass is fast: every page is resident and writable.</p>
+
+<h2>Replacement policies</h2>
+<p>On a miss, which entry should be replaced? The goal is to reduce cache misses: improve the expected case, and reduce the chance of very poor performance.</p>
+<dl class="terms">
+  <dt>Random</dt><dd>Replace a random entry.</dd>
+  <dt>FIFO</dt><dd>Replace the entry that has been in the cache longest. Worst case: a program striding through memory larger than the cache misses every time.</dd>
+  <dt>MIN (optimal)</dt><dd>Replace the entry that will not be used for the longest time into the future. Optimal (if you evict something used sooner, that triggers an earlier miss), but it needs to know the future.</dd>
+  <dt>LRU (least recently used)</dt><dd>Replace the entry not used for the longest time in the past. An approximation of MIN for programs with locality.</dd>
+  <dt>LFU (least frequently used)</dt><dd>Replace the entry used least often in the recent past.</dd>
+</dl>
+
+<h3>How to count faults</h3>
+<p>Keep a row of frames. For each reference: if the page is there, it's a hit; if not, it's a fault, and if all frames are full you evict according to the policy.</p>
+<ul>
+  <li><strong>FIFO:</strong> evict the page that was loaded earliest. Hits do not change the order.</li>
+  <li><strong>LRU:</strong> evict the page whose last use is furthest back. Hits <em>do</em> count as use.</li>
+  <li><strong>MIN:</strong> look ahead and evict the page whose next use is furthest away (or never comes).</li>
+</ul>
+<p>Worked example, 3 frames, references <code>A B C A D B E F A C D</code> (2025 exam):</p>
+<table>
+<thead><tr><th>Ref</th><th>FIFO frames</th><th></th><th>LRU frames</th><th></th><th>MIN frames</th><th></th></tr></thead>
+<tbody>
+<tr><td>A</td><td>A</td><td>fault</td><td>A</td><td>fault</td><td>A</td><td>fault</td></tr>
+<tr><td>B</td><td>A B</td><td>fault</td><td>A B</td><td>fault</td><td>A B</td><td>fault</td></tr>
+<tr><td>C</td><td>A B C</td><td>fault</td><td>A B C</td><td>fault</td><td>A B C</td><td>fault</td></tr>
+<tr><td>A</td><td>A B C</td><td>hit</td><td>A B C</td><td>hit</td><td>A B C</td><td>hit</td></tr>
+<tr><td>D</td><td>D B C</td><td>fault</td><td>A D C</td><td>fault</td><td>A B D</td><td>fault</td></tr>
+<tr><td>B</td><td>D B C</td><td>hit</td><td>A D B</td><td>fault</td><td>A B D</td><td>hit</td></tr>
+<tr><td>E</td><td>D E C</td><td>fault</td><td>E D B</td><td>fault</td><td>A E D</td><td>fault</td></tr>
+<tr><td>F</td><td>D E F</td><td>fault</td><td>E F B</td><td>fault</td><td>A F D</td><td>fault</td></tr>
+<tr><td>A</td><td>A E F</td><td>fault</td><td>E F A</td><td>fault</td><td>A F D</td><td>hit</td></tr>
+<tr><td>C</td><td>A C F</td><td>fault</td><td>C F A</td><td>fault</td><td>C F D</td><td>fault</td></tr>
+<tr><td>D</td><td>A C D</td><td>fault</td><td>C D A</td><td>fault</td><td>C F D</td><td>hit</td></tr>
+<tr><td colspan="7"><strong>Faults:</strong> FIFO 9, LRU 10, MIN 7</td></tr>
+</tbody>
+</table>
+<p>The frames are shown by slot; the evicted page is replaced in place.</p>
+<p>Exercise string <code>7 0 1 2 0 3 0 4 2 3 0 3 2 1 2 0 1 7 0 1</code> with 3 frames gives FIFO 15, LRU 12, MIN 9 faults.</p>
+
+<h3>Belady's anomaly</h3>
+<p>With FIFO, more memory can mean more faults. The string <code>3 2 1 0 3 2 4 3 2 1 0 4</code> gives 9 faults with 3 frames and 10 with 4. MIN and LRU never behave this way (they have the stack property).</p>
+
+<h3>Clock and Nth chance</h3>
+<p>Exact LRU is expensive. The <dfn>clock algorithm</dfn> approximates it: periodically sweep through all pages; if a page is unused, reclaim it; if it is used, mark it unused. Linux's page cache approximates LRU this way.</p>
+<p><dfn>Nth chance</dfn> keeps an integer per page instead of one bit: the number of sweeps since last use.</p>
+<pre><code>if (page is used) {
+    notInUseSince = 0;
+} else if (notInUseSince &lt; N) {
+    notInUseSince++;
+} else {
+    reclaim page;
+}</code></pre>
+<p>Both can run in the page fault handler, or asynchronously in a thread that keeps a pool of recently unused clean pages (writing dirty ones back first). On a page fault, check the pool first.</p>
+<p class="note"><strong>Recap:</strong> MIN is optimal. LRU approximates MIN for programs with spatial and temporal locality. Clock and Nth chance approximate LRU.</p>
+
+<h2>Working sets and thrashing</h2>
+<p>The <dfn>working set</dfn> is the set of memory locations that must be cached for a reasonable hit rate. When a program runs in a loop, after some page faults it has its working set in memory and runs without faults.</p>
+<p><dfn>Thrashing</dfn> is when the cache is too small. If the sum of the working sets of all processes is larger than physical memory, processes keep stealing pages from each other: each one faults as soon as it runs. Many processes are running but the CPU does little useful work. Programs also show <em>phase change</em> behaviour: the working set changes over time.</p>
+
+<h2>Zipf workloads</h2>
+<p>Many systems don't follow the working set model. In a <dfn>Zipf distribution</dfn> the popularity of the k-th most popular item is about 1/k<sup>c</sup>, with 1 &lt; c &lt; 2. Examples: web pages, movies, library books, words in text, salaries, city populations. The common thread is that popularity is self-reinforcing. Caching helps with the popular items, but the long tail means the hit rate grows only slowly with cache size.</p>

@@ -1,0 +1,110 @@
+<p class="summary">What happens when a program has many locks on many cores: cache coherence, false sharing, lock contention, MCS locks and RCU – and deadlock, with its four conditions and the ways to prevent, avoid or detect it.</p>
+
+<h2>Multi-object programs</h2>
+<p>In a large program each object has its own lock and condition variables. That raises new questions: is locking modular? What about performance, correctness and deadlock? Can we eliminate locks?</p>
+
+<h2>Synchronisation performance</h2>
+<p>Lots of threads can still give poor performance on a multiprocessor because of:</p>
+<ul>
+  <li>the overhead of creating threads that aren't needed,</li>
+  <li><strong>lock contention</strong>: only one thread at a time can hold a lock,</li>
+  <li>shared data protected by a lock pinging back and forth between cores,</li>
+  <li><strong>false sharing</strong>: communication between cores even for data that isn't shared.</li>
+</ul>
+<p>Lock contention can be much greater on a multicore system than on a single core, where only one thread runs at a time anyway.</p>
+
+<h2>Cache coherence</h2>
+<p>Thread A changes data in a critical section and releases the lock; thread B takes the lock and reads the data. If every access went to main memory that would be easy, but A's new value may be in A's cache and an old value in B's cache.</p>
+<p><dfn>Cache coherence</dfn> makes the system behave as if there is one copy of the data:</p>
+<ul>
+  <li>If data is only read, any number of caches can have a copy.</li>
+  <li>If data is being modified, there is at most one cached copy.</li>
+  <li><strong>On a write:</strong> get ownership – invalidate all other cached copies first. The modified data stays in the cache (write-back).</li>
+  <li><strong>On a read:</strong> fetch the value from the owner or from memory.</li>
+</ul>
+<p>Each cache line is in one of three states: <em>invalid</em>, <em>read-only</em> (shared) or <em>exclusive</em> (writable). A read miss makes it read-only; a write makes it exclusive; a peer's write invalidates it; a peer's read turns exclusive into read-only. With directory-based coherence the hardware keeps track of all cached copies. A read-modify-write instruction fetches the line exclusive and blocks others until it completes.</p>
+
+<h3>False sharing</h3>
+<p>Coherence works on whole cache lines (typically 64 bytes), not single variables. If two cores write different variables that happen to share a line, each write invalidates the other core's copy. The line is treated as shared even though the cores use unique addresses within it. This adds coherence traffic and latency, and limits scaling.</p>
+
+<h3>A test of cache behaviour</h3>
+<p>An array of 1K counters, each protected by its own spinlock, on a 64-core AMD Opteron:</p>
+<table>
+<thead><tr><th>Test</th><th class="num">Cycles per increment</th></tr></thead>
+<tbody>
+<tr><td>One thread, one array</td><td class="num">51</td></tr>
+<tr><td>Two threads, two arrays</td><td class="num">52</td></tr>
+<tr><td>Two threads, one array</td><td class="num">197</td></tr>
+<tr><td>Two threads, odd/even elements (false sharing)</td><td class="num">127</td></tr>
+</tbody>
+</table>
+
+<h2>Reducing lock contention</h2>
+<dl class="terms">
+  <dt>Fine-grained locking</dt><dd>Partition an object into subsets, each with its own lock. Example: one lock per hash table bucket.</dd>
+  <dt>Per-processor data structures</dt><dd>Partition the object so most accesses come from one processor. Example: a per-processor heap.</dd>
+  <dt>Ownership or staged architecture</dt><dd>Only one thread at a time accesses the shared data. Example: a pipeline of threads.</dd>
+</dl>
+
+<h2>When locks are mostly busy</h2>
+<h3>The problem with test-and-set</h3>
+<p>If many processors try to take a spinlock at once, the hardware doesn't prioritise the release, and the lock value pings between caches. Test-and-test-and-set (only try test-and-set when the lock looks free) still has this problem when many wait. Approaches: add a delay in the spin loop (slow when there is little contention), spin adaptively, or use MCS.</p>
+<h3>Compare-and-swap</h3>
+<p>Operates on a memory word: check that the value is still what you expect (no other thread changed it). If it changed, return an error (and loop); if not, set the new value.</p>
+<h3>MCS locks</h3>
+<p>Mellor-Crummey and Scott optimise for a contended lock. Waiting threads form a linked list built with compare-and-swap. The front of the list holds the lock, and each waiter spins on its <em>own</em> flag (<code>needToWait</code>) rather than on the shared lock. Release passes the lock on by setting <code>next-&gt;needToWait = FALSE</code>.</p>
+<h3>Read-copy-update (RCU)</h3>
+<p>For very fast reads of mostly read-only data (used in the Linux kernel):</p>
+<ul>
+  <li>Readers proceed without acquiring a lock (they disable interrupts, so they finish quickly).</li>
+  <li>A writer acquires the write lock – so only <strong>one</strong> write happens at a time – computes a new version of the data, publishes it with a single atomic instruction, and releases the write lock.</li>
+  <li>Readers may see the old or the new version.</li>
+  <li>The writer waits for a grace period (a time slice on every CPU) so all readers are done, then garbage-collects the old version.</li>
+</ul>
+
+<h2>Deadlock</h2>
+<dl class="terms">
+  <dt>Resource</dt><dd>Anything a thread needs to do its job: CPU, disk space, memory, a lock. <em>Preemptable</em> resources can be taken away by the OS; <em>non-preemptable</em> ones must be left with the thread.</dd>
+  <dt>Starvation</dt><dd>A thread waits indefinitely.</dd>
+  <dt>Deadlock</dt><dd>Circular waiting for resources. Deadlock implies starvation, but not the other way round.</dd>
+</dl>
+
+<h3>Examples</h3>
+<pre><code>Thread A               Thread B
+lock1.acquire();       lock2.acquire();
+lock2.acquire();       lock1.acquire();
+lock2.release();       lock1.release();
+lock1.release();       lock2.release();</code></pre>
+<p>Other examples from the lecture: two bounded buffers used in opposite directions when both start almost full; waiting on a condition variable for lock2 while still holding lock1 (the signaller can't get lock1); and the <strong>dining lawyers</strong>, where each lawyer needs two chopsticks and grabs the one on the right first.</p>
+
+<h3>The four necessary conditions</h3>
+<ol>
+  <li><strong>Limited access to resources.</strong> With infinite resources there's no deadlock.</li>
+  <li><strong>No preemption.</strong> If resources can be taken away (are virtual), the deadlock can be broken.</li>
+  <li><strong>Multiple independent requests</strong> (“wait while holding” or “hold while waiting”).</li>
+  <li><strong>Circular chain of requests.</strong></li>
+</ol>
+<p>All four must hold. “Preemption” is therefore <em>not</em> a deadlock condition (2024 Q17).</p>
+
+<h2>Dealing with deadlock</h2>
+<h3>Exploit or limit program behaviour</h3>
+<ul>
+  <li><strong>Provide enough resources.</strong> How many chopsticks are enough?</li>
+  <li><strong>Eliminate wait while holding.</strong> Release the lock when calling out of a module.</li>
+  <li><strong>Eliminate circular waiting with lock ordering:</strong> always acquire locks in a fixed order. Example: moving a file from one directory to another.</li>
+</ul>
+<div class="exam-tip"><span class="tip-label">The course's deadlock exercise</span>
+<p>In <code>sem-deadlock.c</code> the producer waits on <code>semC</code> then <code>semP</code>, while the consumer waits on <code>semP</code> then <code>semC</code>. Each can hold one and wait for the other. The fix is to make the producer take <code>semP</code> first as well, so both threads acquire the semaphores in the same order. Run it in a loop (<code>while true; do ./sem-deadlock; done</code>) to see the deadlock before and its absence after.</p></div>
+
+<h3>Predict the future: the Banker's algorithm</h3>
+<p>Each thread states its maximum resource needs in advance. Resources are then allocated dynamically, and a request waits if granting it could lead to deadlock.</p>
+<dl class="terms">
+  <dt>Safe state</dt><dd>For any possible sequence of future requests, it is possible to eventually grant all of them. May require waiting even when resources are available.</dd>
+  <dt>Unsafe state</dt><dd>Some sequence of requests can lead to deadlock.</dd>
+  <dt>Doomed state</dt><dd>All possible computations lead to deadlock.</dd>
+</dl>
+<p>The Banker's algorithm grants a request if and only if the result is a safe state, meaning some order exists in which every thread can finish. The sum of maximum needs can exceed the total, as long as there is a way for everyone to finish. A simple test for one thread: proceed if total resources − allocated ≥ the most this thread might still need.</p>
+<p>To check safety, keep <em>Available</em> (free of each resource), <em>Max</em> and <em>Allocation</em> for each thread, and <em>Need = Max − Allocation</em>. Repeatedly find a thread whose Need fits in Available, pretend it finishes and returns its Allocation to Available. If every thread can finish this way, the state is safe.</p>
+
+<h3>Detect and repair</h3>
+<p>Scan the wait-for graph, detect cycles and fix them: either proceed without the resource (which needs robust exception handling), or roll back and retry, as with transactions, where all operations are provisional until all required resources are held.</p>
